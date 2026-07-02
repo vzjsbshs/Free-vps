@@ -34,9 +34,7 @@ def init():
     conn = get_db()
     c = conn.cursor()
     
-    c.execute('DROP TABLE IF EXISTS users')
-    c.execute('DROP TABLE IF EXISTS codes')
-    c.execute('DROP TABLE IF EXISTS hosting_accounts')
+    # IMPORTANT: NO DROP TABLE - This preserves all data!
     
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -47,6 +45,7 @@ def init():
         referred_by INTEGER DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS codes (
         code TEXT PRIMARY KEY,
         amount REAL,
@@ -54,6 +53,7 @@ def init():
         created_by INTEGER,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS hosting_accounts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -67,9 +67,10 @@ def init():
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         expiry_date TEXT
     )''')
+    
     conn.commit()
     conn.close()
-    print("✅ Database initialized!")
+    print("✅ Database initialized (data preserved!)")
 
 init()
 
@@ -410,13 +411,10 @@ PLANS = {
 
 # ===== AUTO-EXPIRY CHECK =====
 async def check_expired_servers(context):
-    """Background job to check and delete expired servers"""
     try:
         expired = get_expired_servers()
         for server in expired:
-            # Delete VPS from RAW
             delete_raw_vps(server['username'])
-            # Deactivate in database
             deactivate_server(server['id'])
             print(f"🗑️ Deleted expired VPS: {server['domain']}")
     except Exception as e:
@@ -542,7 +540,6 @@ async def my_hosting(update, context):
 Buy a VPS plan from the PLANS menu.
 Earn credits by referring friends!"""
     else:
-        # Calculate remaining time
         expiry = datetime.strptime(hosting['expiry_date'], '%Y-%m-%d %H:%M:%S')
         remaining = expiry - datetime.now()
         hours = int(remaining.total_seconds() // 3600)
@@ -611,24 +608,19 @@ async def buy_plan(update, context):
             )
             return
         
-        # Deduct credits
         update_balance(uid, -plan['price'])
         
-        # Generate credentials
         username = f"user{uid}_{random.randint(100,999)}"
         password = ''.join(random.choices(string.ascii_letters + string.digits + "!@#$%^&*", k=12))
         
-        # Show processing message
         await query.edit_message_text(
             f"⏳ Creating your VPS ({plan['duration']} hours)...\n\nPlease wait, this may take a few minutes.",
             parse_mode='Markdown'
         )
         
-        # Create VPS on RAW
         result = create_raw_vps(username, password)
         
         if result['success']:
-            # Save to database
             save_hosting_account(
                 uid, 
                 result.get('domain', f"{username}.raw-host.com"),
@@ -639,7 +631,6 @@ async def buy_plan(update, context):
                 plan['duration']
             )
             
-            # Send credentials
             creds_text = f"""✅ VPS ACTIVATED! 🎉
 
 ━━━━━━━━━━━━━━━━━━━━━
@@ -658,14 +649,12 @@ SSH Login:
             
             await query.edit_message_text(creds_text, parse_mode='Markdown')
             
-            # Notify admin
             await context.bot.send_message(
                 ADMIN_ID,
                 f"✅ NEW VPS ACTIVATED!\n\n👤 User: `{uid}`\n📦 Plan: {plan['name']}\n⏳ Duration: {plan['duration']} hours\n🖥️ IP: `{result['ip']}`\n👤 Username: `{result['username']}`\n🔑 Password: `{password}`",
                 parse_mode='Markdown'
             )
         else:
-            # Refund if failed
             update_balance(uid, plan['price'])
             
             await query.edit_message_text(
@@ -948,7 +937,6 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_gen_code, pattern='^gen_code$'))
     app.add_handler(CallbackQueryHandler(admin_stats, pattern='^stats$'))
     
-    # Start auto-expiry checker (runs every 5 minutes)
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(check_expired_servers, interval=300, first=30)
