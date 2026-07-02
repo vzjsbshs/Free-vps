@@ -62,6 +62,7 @@ def init():
         password TEXT,
         ip_address TEXT,
         plan TEXT,
+        duration TEXT,
         status TEXT DEFAULT 'active',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         expiry_date TEXT
@@ -72,10 +73,9 @@ def init():
 
 init()
 
-# ===== RAW VPS FUNCTIONS (NO API KEY NEEDED) =====
+# ===== RAW VPS FUNCTIONS =====
 
 def check_raw_installed():
-    """Check if RAW CLI is installed"""
     try:
         subprocess.run(['raw', '--version'], capture_output=True, check=True, timeout=10)
         return True
@@ -83,18 +83,12 @@ def check_raw_installed():
         return False
 
 def create_raw_vps(username, password):
-    """
-    Create a VPS using RAW CLI - NO API KEY NEEDED
-    RAW handles authentication internally after 'raw init'
-    """
     try:
-        # Check if RAW is installed
         if not check_raw_installed():
-            return {'success': False, 'error': 'RAW CLI not installed. Run: npm install -g rawhq'}
+            return {'success': False, 'error': 'RAW CLI not installed'}
         
         print(f"🚀 Deploying RAW VPS for {username}...")
         
-        # Deploy the server - simple command, no API key needed
         deploy_cmd = [
             'raw', 'deploy',
             '--type', 'raw-free',
@@ -108,14 +102,11 @@ def create_raw_vps(username, password):
             error_msg = result.stderr or result.stdout or 'Deployment failed'
             return {'success': False, 'error': error_msg}
         
-        # Wait for server to be ready
         time.sleep(15)
         
-        # Try to get server IP
         ip = None
         domain = f"{username}.raw-host.com"
         
-        # Method 1: Try JSON output
         try:
             status_cmd = ['raw', 'status', '--output', 'json']
             status_result = subprocess.run(status_cmd, capture_output=True, text=True, timeout=30)
@@ -129,7 +120,6 @@ def create_raw_vps(username, password):
         except:
             pass
         
-        # Method 2: Try to get IP via SSH
         if not ip or ip == 'unknown':
             try:
                 ip_cmd = ['raw', 'ssh', username, '--command', 'curl -s ifconfig.me']
@@ -139,7 +129,6 @@ def create_raw_vps(username, password):
             except:
                 pass
         
-        # Method 3: Try to find IP in deploy output
         if not ip or ip == 'unknown':
             ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', result.stdout)
             if ip_match:
@@ -160,6 +149,14 @@ def create_raw_vps(username, password):
         return {'success': False, 'error': 'Deployment timed out'}
     except Exception as e:
         return {'success': False, 'error': str(e)}
+
+def delete_raw_vps(username):
+    try:
+        delete_cmd = ['raw', 'destroy', username]
+        result = subprocess.run(delete_cmd, capture_output=True, text=True, timeout=60)
+        return result.returncode == 0
+    except:
+        return False
 
 # ===== DATABASE FUNCTIONS =====
 
@@ -274,14 +271,14 @@ def use_code(code, uid):
             conn.close()
         return False, 0
 
-def save_hosting_account(user_id, domain, username, password, ip, plan):
+def save_hosting_account(user_id, domain, username, password, ip, plan, duration):
     try:
         conn = get_db()
         c = conn.cursor()
-        expiry = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
-        c.execute('''INSERT INTO hosting_accounts (user_id, domain, username, password, ip_address, plan, expiry_date) 
-                     VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                  (user_id, domain, username, password, ip, plan, expiry))
+        expiry = (datetime.now() + timedelta(hours=duration)).strftime('%Y-%m-%d %H:%M:%S')
+        c.execute('''INSERT INTO hosting_accounts (user_id, domain, username, password, ip_address, plan, duration, expiry_date) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (user_id, domain, username, password, ip, plan, f"{duration} hours", expiry))
         conn.commit()
         conn.close()
         return True
@@ -300,6 +297,28 @@ def get_hosting_account(user_id):
         return None
     except:
         return None
+
+def get_expired_servers():
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('SELECT * FROM hosting_accounts WHERE status = "active" AND expiry_date <= datetime("now")')
+        r = c.fetchall()
+        conn.close()
+        return r
+    except:
+        return []
+
+def deactivate_server(server_id):
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('UPDATE hosting_accounts SET status = "expired" WHERE id = ?', (server_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except:
+        return False
 
 def get_total():
     try:
@@ -347,11 +366,61 @@ def get_unused_codes():
 
 # ===== PLANS =====
 PLANS = {
-    'starter': {'name': '🌱 Starter', 'price': 50, 'cpu': '1 vCPU', 'ram': '1 GB', 'storage': '10 GB'},
-    'pro': {'name': '🚀 Pro', 'price': 100, 'cpu': '2 vCPU', 'ram': '2 GB', 'storage': '20 GB'},
-    'business': {'name': '💼 Business', 'price': 200, 'cpu': '4 vCPU', 'ram': '4 GB', 'storage': '40 GB'},
-    'enterprise': {'name': '🏢 Enterprise', 'price': 500, 'cpu': '8 vCPU', 'ram': '8 GB', 'storage': '80 GB'}
+    '5hours': {
+        'name': '⏰ 5 Hours', 
+        'price': 10, 
+        'cpu': '1 vCPU', 
+        'ram': '1 GB', 
+        'storage': '10 GB',
+        'duration': 5
+    },
+    '1day': {
+        'name': '📅 1 Day', 
+        'price': 25, 
+        'cpu': '1 vCPU', 
+        'ram': '1 GB', 
+        'storage': '10 GB',
+        'duration': 24
+    },
+    '2days': {
+        'name': '📅 2 Days', 
+        'price': 45, 
+        'cpu': '2 vCPU', 
+        'ram': '2 GB', 
+        'storage': '20 GB',
+        'duration': 48
+    },
+    '3days': {
+        'name': '📅 3 Days', 
+        'price': 60, 
+        'cpu': '2 vCPU', 
+        'ram': '2 GB', 
+        'storage': '20 GB',
+        'duration': 72
+    },
+    '1week': {
+        'name': '📅 1 Week', 
+        'price': 100, 
+        'cpu': '2 vCPU', 
+        'ram': '4 GB', 
+        'storage': '40 GB',
+        'duration': 168
+    }
 }
+
+# ===== AUTO-EXPIRY CHECK =====
+async def check_expired_servers(context):
+    """Background job to check and delete expired servers"""
+    try:
+        expired = get_expired_servers()
+        for server in expired:
+            # Delete VPS from RAW
+            delete_raw_vps(server['username'])
+            # Deactivate in database
+            deactivate_server(server['id'])
+            print(f"🗑️ Deleted expired VPS: {server['domain']}")
+    except Exception as e:
+        print(f"❌ Error checking expired servers: {e}")
 
 # ===== MAIN MENU =====
 async def show_main_menu(update, context):
@@ -375,7 +444,7 @@ async def show_main_menu(update, context):
         
         refs = get_refs(uid)
         hosting = get_hosting_account(uid)
-        hosting_status = "❌ No Active VPS" if not hosting else f"✅ Active: {hosting['domain']}"
+        hosting_status = "❌ No Active VPS" if not hosting else f"✅ Active: {hosting['domain']} ({hosting['duration']} remaining)"
         
         keyboard = [
             [InlineKeyboardButton("🛒 BUY VPS", callback_data='plans')],
@@ -473,6 +542,12 @@ async def my_hosting(update, context):
 Buy a VPS plan from the PLANS menu.
 Earn credits by referring friends!"""
     else:
+        # Calculate remaining time
+        expiry = datetime.strptime(hosting['expiry_date'], '%Y-%m-%d %H:%M:%S')
+        remaining = expiry - datetime.now()
+        hours = int(remaining.total_seconds() // 3600)
+        minutes = int((remaining.total_seconds() % 3600) // 60)
+        
         text = f"""📊 MY VPS
 
 ━━━━━━━━━━━━━━━━━━━━━
@@ -482,6 +557,8 @@ Earn credits by referring friends!"""
 👤 Username: `{hosting['username']}`
 🔑 Password: `{hosting['password']}`
 📦 Plan: {hosting['plan']}
+⏳ Duration: {hosting['duration']}
+⏰ Time Remaining: `{hours}h {minutes}m`
 📅 Created: {hosting['created_at']}
 📅 Expires: {hosting['expiry_date']}
 
@@ -490,7 +567,7 @@ Earn credits by referring friends!"""
 SSH Login:
 `ssh {hosting['username']}@{hosting['ip_address']}`
 
-⚠️ Save your credentials! You won't see them again!"""
+⚠️ Save your credentials!"""
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -500,11 +577,11 @@ async def show_plans(update, context):
         query = update.callback_query
         await query.answer()
         
-        text = "🛒 VPS PLANS\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+        text = "🛒 VPS PLANS (Time-Based)\n━━━━━━━━━━━━━━━━━━━━━\n\n"
         keyboard = []
         for k, v in PLANS.items():
-            text += f"{v['name']}\n💰 Price: `{v['price']}` Credits\n⚡ CPU: {v['cpu']}\n💾 RAM: {v['ram']}\n📀 Storage: {v['storage']}\n📅 Duration: 30 Days\n\n"
-            keyboard.append([InlineKeyboardButton(f"🛒 Buy {v['name']} - {v['price']} Credits", callback_data=f'buy_{k}')])
+            text += f"{v['name']}\n💰 Price: `{v['price']}` Credits\n⚡ CPU: {v['cpu']}\n💾 RAM: {v['ram']}\n📀 Storage: {v['storage']}\n⏳ Duration: {v['duration']} hours\n\n"
+            keyboard.append([InlineKeyboardButton(f"🛒 {v['name']} - {v['price']} Credits", callback_data=f'buy_{k}')])
         keyboard.append([InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     except Exception as e:
@@ -543,7 +620,7 @@ async def buy_plan(update, context):
         
         # Show processing message
         await query.edit_message_text(
-            "⏳ Creating your VPS...\n\nPlease wait, this may take a few minutes.",
+            f"⏳ Creating your VPS ({plan['duration']} hours)...\n\nPlease wait, this may take a few minutes.",
             parse_mode='Markdown'
         )
         
@@ -558,7 +635,8 @@ async def buy_plan(update, context):
                 result['username'],
                 password,
                 result['ip'],
-                plan['name']
+                plan['name'],
+                plan['duration']
             )
             
             # Send credentials
@@ -570,19 +648,20 @@ async def buy_plan(update, context):
 👤 Username: `{result['username']}`
 🔑 Password: `{password}`
 📦 Plan: {plan['name']}
+⏳ Duration: {plan['duration']} hours
 ━━━━━━━━━━━━━━━━━━━━━
 
 SSH Login:
 `ssh {result['username']}@{result['ip']}`
 
-⚠️ Save these credentials! You won't see them again!"""
+⚠️ Save these credentials! Your VPS will expire after {plan['duration']} hours!"""
             
             await query.edit_message_text(creds_text, parse_mode='Markdown')
             
             # Notify admin
             await context.bot.send_message(
                 ADMIN_ID,
-                f"✅ NEW VPS ACTIVATED!\n\n👤 User: `{uid}`\n📦 Plan: {plan['name']}\n🖥️ IP: `{result['ip']}`\n👤 Username: `{result['username']}`\n🔑 Password: `{password}`",
+                f"✅ NEW VPS ACTIVATED!\n\n👤 User: `{uid}`\n📦 Plan: {plan['name']}\n⏳ Duration: {plan['duration']} hours\n🖥️ IP: `{result['ip']}`\n👤 Username: `{result['username']}`\n🔑 Password: `{password}`",
                 parse_mode='Markdown'
             )
         else:
@@ -738,18 +817,20 @@ async def support(update, context):
 2️⃣ Every 5 referrals → 25 bonus credits
 3️⃣ Redeem promo codes
 
-❓ How to get VPS hosting?
-1️⃣ Earn 50+ credits
-2️⃣ Buy a plan from PLANS menu
+❓ How to get VPS?
+1️⃣ Earn credits
+2️⃣ Buy a time-based plan
 3️⃣ VPS is created automatically!
+4️⃣ VPS expires after time ends
 
-❓ Need help?
-Contact admin: @Free_hostingbyreferbot
+⏳ Available Plans:
+• 5 Hours - 10 Credits
+• 1 Day - 25 Credits
+• 2 Days - 45 Credits
+• 3 Days - 60 Credits
+• 1 Week - 100 Credits
 
-Commands:
-/start - Main menu
-/menu - Show menu
-/redeem - Redeem code"""
+Contact admin: @Free_hostingbyreferbot"""
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -841,13 +922,10 @@ async def stats_direct(update, context):
 def main():
     print("🚀 Starting bot...")
     
-    # Check if RAW is installed
     if check_raw_installed():
         print("✅ RAW CLI is installed")
     else:
         print("⚠️ RAW CLI not found. VPS creation will fail.")
-        print("   To install: npm install -g rawhq")
-        print("   Then run: raw init")
     
     app = Application.builder().token(TOKEN).build()
     
@@ -869,6 +947,12 @@ def main():
     app.add_handler(CallbackQueryHandler(buy_plan, pattern='^buy_'))
     app.add_handler(CallbackQueryHandler(admin_gen_code, pattern='^gen_code$'))
     app.add_handler(CallbackQueryHandler(admin_stats, pattern='^stats$'))
+    
+    # Start auto-expiry checker (runs every 5 minutes)
+    job_queue = app.job_queue
+    if job_queue:
+        job_queue.run_repeating(check_expired_servers, interval=300, first=30)
+        print("✅ Auto-expiry checker started")
     
     print("🤖 Bot is running!")
     app.run_polling()
