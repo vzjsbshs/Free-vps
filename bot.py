@@ -1,4 +1,5 @@
 import os
+import sys
 import sqlite3
 import random
 import string
@@ -10,6 +11,9 @@ import re
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+
+# ===== FIX: Ensure RAW is in PATH =====
+os.environ['PATH'] = os.environ.get('PATH', '') + ':/usr/local/bin'
 
 # ===== SETUP =====
 TOKEN = os.environ.get('BOT_TOKEN')
@@ -33,8 +37,6 @@ def get_db():
 def init():
     conn = get_db()
     c = conn.cursor()
-    
-    # IMPORTANT: NO DROP TABLE - This preserves all data!
     
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -78,29 +80,51 @@ init()
 
 def check_raw_installed():
     try:
-        subprocess.run(['raw', '--version'], capture_output=True, check=True, timeout=10)
+        result = subprocess.run(['raw', '--version'], capture_output=True, check=True, timeout=10)
+        print(f"✅ RAW version: {result.stdout.strip()}")
         return True
-    except:
+    except FileNotFoundError:
+        print("❌ RAW not found in PATH. Trying to find it...")
+        possible_paths = ['/usr/local/bin/raw', '/usr/bin/raw', '/root/.npm-global/bin/raw']
+        for path in possible_paths:
+            if os.path.exists(path):
+                print(f"✅ Found RAW at: {path}")
+                os.environ['PATH'] += f":{os.path.dirname(path)}"
+                return True
+        return False
+    except Exception as e:
+        print(f"❌ Error checking RAW: {e}")
         return False
 
 def create_raw_vps(username, password):
     try:
+        print(f"🔍 Checking RAW installation...")
         if not check_raw_installed():
-            return {'success': False, 'error': 'RAW CLI not installed'}
+            return {'success': False, 'error': 'RAW CLI not installed. Run: npm install -g rawhq'}
         
         print(f"🚀 Deploying RAW VPS for {username}...")
         
+        raw_cmd = 'raw'
+        
         deploy_cmd = [
-            'raw', 'deploy',
+            raw_cmd, 'deploy',
             '--type', 'raw-free',
             '--region', 'eu',
             '--name', username
         ]
         
-        result = subprocess.run(deploy_cmd, capture_output=True, text=True, timeout=120)
+        print(f"📝 Running: {' '.join(deploy_cmd)}")
+        
+        result = subprocess.run(deploy_cmd, capture_output=True, text=True, timeout=180)
+        
+        print(f"📤 Return code: {result.returncode}")
         
         if result.returncode != 0:
             error_msg = result.stderr or result.stdout or 'Deployment failed'
+            if 'not authenticated' in error_msg.lower():
+                return {'success': False, 'error': 'RAW not authenticated. Run: raw init'}
+            if 'already exists' in error_msg.lower():
+                return {'success': False, 'error': 'Server name already exists. Try again...'}
             return {'success': False, 'error': error_msg}
         
         time.sleep(15)
@@ -109,7 +133,7 @@ def create_raw_vps(username, password):
         domain = f"{username}.raw-host.com"
         
         try:
-            status_cmd = ['raw', 'status', '--output', 'json']
+            status_cmd = [raw_cmd, 'status', '--output', 'json']
             status_result = subprocess.run(status_cmd, capture_output=True, text=True, timeout=30)
             
             if status_result.returncode == 0 and status_result.stdout:
@@ -123,7 +147,7 @@ def create_raw_vps(username, password):
         
         if not ip or ip == 'unknown':
             try:
-                ip_cmd = ['raw', 'ssh', username, '--command', 'curl -s ifconfig.me']
+                ip_cmd = [raw_cmd, 'ssh', username, '--command', 'curl -s ifconfig.me']
                 ip_result = subprocess.run(ip_cmd, capture_output=True, text=True, timeout=30)
                 if ip_result.returncode == 0 and ip_result.stdout.strip():
                     ip = ip_result.stdout.strip()
@@ -147,8 +171,9 @@ def create_raw_vps(username, password):
         }
         
     except subprocess.TimeoutExpired:
-        return {'success': False, 'error': 'Deployment timed out'}
+        return {'success': False, 'error': 'Deployment timed out (took too long)'}
     except Exception as e:
+        print(f"❌ Exception: {e}")
         return {'success': False, 'error': str(e)}
 
 def delete_raw_vps(username):
@@ -457,22 +482,22 @@ async def show_main_menu(update, context):
 ✨ Welcome, @{username} 🎉
 ━━━━━━━━━━━━━━━━━━━━━
 
-🆔 User ID: `{uid}`
-💰 Balance: `{balance:.2f}` Credits
-👥 Total Invites: `{refs}` users
+🆔 User ID: {uid}
+💰 Balance: {balance:.2f} Credits
+👥 Total Invites: {refs} users
 📊 VPS Status: {hosting_status}
 
 ━━━━━━━━━━━━━━━━━━━━━
 🔗 Your Invite Link:
-`https://t.me/{context.bot.username}?start={uid}`
+https://t.me/{context.bot.username}?start={uid}
 ━━━━━━━━━━━━━━━━━━━━━
 
 Invite friends to earn credits!"""
         
         if is_message:
-            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         print(f"❌ Error in main menu: {e}")
 
@@ -502,8 +527,7 @@ async def start(update, context):
                     balance = float(referrer['balance']) if referrer['balance'] else 0
                     await context.bot.send_message(
                         int(ref),
-                        f"🎉 New Referral!\n\n@{username} joined using your link!\n✅ +15 Credits!\n💰 New Balance: `{balance:.2f}` Credits",
-                        parse_mode='Markdown'
+                        f"🎉 New Referral!\n\n@{username} joined using your link!\n✅ +15 Credits!\n💰 New Balance: {balance:.2f} Credits"
                     )
             except:
                 pass
@@ -549,24 +573,24 @@ Earn credits by referring friends!"""
 
 ━━━━━━━━━━━━━━━━━━━━━
 
-🌐 Domain: `{hosting['domain']}`
-🖥️ IP Address: `{hosting['ip_address']}`
-👤 Username: `{hosting['username']}`
-🔑 Password: `{hosting['password']}`
+🌐 Domain: {hosting['domain']}
+🖥️ IP Address: {hosting['ip_address']}
+👤 Username: {hosting['username']}
+🔑 Password: {hosting['password']}
 📦 Plan: {hosting['plan']}
 ⏳ Duration: {hosting['duration']}
-⏰ Time Remaining: `{hours}h {minutes}m`
+⏰ Time Remaining: {hours}h {minutes}m
 📅 Created: {hosting['created_at']}
 📅 Expires: {hosting['expiry_date']}
 
 ━━━━━━━━━━━━━━━━━━━━━
 
 SSH Login:
-`ssh {hosting['username']}@{hosting['ip_address']}`
+ssh {hosting['username']}@{hosting['ip_address']}
 
 ⚠️ Save your credentials!"""
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ===== PLANS =====
 async def show_plans(update, context):
@@ -577,10 +601,10 @@ async def show_plans(update, context):
         text = "🛒 VPS PLANS (Time-Based)\n━━━━━━━━━━━━━━━━━━━━━\n\n"
         keyboard = []
         for k, v in PLANS.items():
-            text += f"{v['name']}\n💰 Price: `{v['price']}` Credits\n⚡ CPU: {v['cpu']}\n💾 RAM: {v['ram']}\n📀 Storage: {v['storage']}\n⏳ Duration: {v['duration']} hours\n\n"
+            text += f"{v['name']}\n💰 Price: {v['price']} Credits\n⚡ CPU: {v['cpu']}\n💾 RAM: {v['ram']}\n📀 Storage: {v['storage']}\n⏳ Duration: {v['duration']} hours\n\n"
             keyboard.append([InlineKeyboardButton(f"🛒 {v['name']} - {v['price']} Credits", callback_data=f'buy_{k}')])
         keyboard.append([InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')])
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         print(f"❌ Error in plans: {e}")
 
@@ -603,24 +627,27 @@ async def buy_plan(update, context):
         
         if balance < plan['price']:
             await query.edit_message_text(
-                f"❌ Insufficient Balance!\n\nNeed: `{plan['price']}` Credits\nHave: `{balance:.2f}` Credits\n\nEarn more via referrals or redeem codes!",
-                parse_mode='Markdown'
+                f"❌ Insufficient Balance!\n\nNeed: {plan['price']} Credits\nHave: {balance:.2f} Credits\n\nEarn more via referrals or redeem codes!"
             )
             return
         
+        # Deduct credits
         update_balance(uid, -plan['price'])
         
+        # Generate credentials
         username = f"user{uid}_{random.randint(100,999)}"
         password = ''.join(random.choices(string.ascii_letters + string.digits + "!@#$%^&*", k=12))
         
+        # Show processing message
         await query.edit_message_text(
-            f"⏳ Creating your VPS ({plan['duration']} hours)...\n\nPlease wait, this may take a few minutes.",
-            parse_mode='Markdown'
+            f"⏳ Creating your VPS ({plan['duration']} hours)...\n\nPlease wait, this may take a few minutes."
         )
         
+        # Create VPS on RAW
         result = create_raw_vps(username, password)
         
         if result['success']:
+            # Save to database
             save_hosting_account(
                 uid, 
                 result.get('domain', f"{username}.raw-host.com"),
@@ -631,35 +658,36 @@ async def buy_plan(update, context):
                 plan['duration']
             )
             
+            # Send credentials - NO Markdown to avoid parsing errors
             creds_text = f"""✅ VPS ACTIVATED! 🎉
 
 ━━━━━━━━━━━━━━━━━━━━━
-🌐 Domain: `{result.get('domain', f"{username}.raw-host.com")}`
-🖥️ IP Address: `{result['ip']}`
-👤 Username: `{result['username']}`
-🔑 Password: `{password}`
+🌐 Domain: {result.get('domain', f"{username}.raw-host.com")}
+🖥️ IP Address: {result['ip']}
+👤 Username: {result['username']}
+🔑 Password: {password}
 📦 Plan: {plan['name']}
 ⏳ Duration: {plan['duration']} hours
 ━━━━━━━━━━━━━━━━━━━━━
 
 SSH Login:
-`ssh {result['username']}@{result['ip']}`
+ssh {result['username']}@{result['ip']}
 
 ⚠️ Save these credentials! Your VPS will expire after {plan['duration']} hours!"""
             
-            await query.edit_message_text(creds_text, parse_mode='Markdown')
+            await query.edit_message_text(creds_text)
             
+            # Notify admin
             await context.bot.send_message(
                 ADMIN_ID,
-                f"✅ NEW VPS ACTIVATED!\n\n👤 User: `{uid}`\n📦 Plan: {plan['name']}\n⏳ Duration: {plan['duration']} hours\n🖥️ IP: `{result['ip']}`\n👤 Username: `{result['username']}`\n🔑 Password: `{password}`",
-                parse_mode='Markdown'
+                f"✅ NEW VPS ACTIVATED!\n\n👤 User: {uid}\n📦 Plan: {plan['name']}\n⏳ Duration: {plan['duration']} hours\n🖥️ IP: {result['ip']}\n👤 Username: {result['username']}\n🔑 Password: {password}"
             )
         else:
+            # Refund if failed
             update_balance(uid, plan['price'])
             
             await query.edit_message_text(
-                f"❌ VPS Creation Failed!\n\nError: {result.get('error', 'Unknown error')}\n\n💰 Credits have been refunded.\n\nContact admin: @Free_hostingbyreferbot",
-                parse_mode='Markdown'
+                f"❌ VPS Creation Failed!\n\nError: {result.get('error', 'Unknown error')}\n\n💰 Credits have been refunded.\n\nContact admin: @Free_hostingbyreferbot"
             )
     except Exception as e:
         print(f"❌ Error in buy: {e}")
@@ -685,15 +713,15 @@ async def profile(update, context):
         text = f"""👤 USER PROFILE
 ━━━━━━━━━━━━━━━━━━━━━
 
-🆔 User ID: `{uid}`
+🆔 User ID: {uid}
 📛 Username: @{user['username'] or 'N/A'}
-💰 Balance: `{balance:.2f}` Credits
-👥 Total Referrals: `{refs}`
+💰 Balance: {balance:.2f} Credits
+👥 Total Referrals: {refs}
 
 📊 Referral Progress: {refs}/5 for bonus!
 💻 VPS: {'✅ Active' if hosting else '❌ None'}"""
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         print(f"❌ Error in profile: {e}")
 
@@ -703,17 +731,14 @@ async def redeem(update, context):
     await query.answer()
     keyboard = [[InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')]]
     await query.edit_message_text(
-        "🎁 REDEEM CODE\n━━━━━━━━━━━━━━━━━━━━━\n\nSend the code using:\n`/redeem DYNO-XXXX-XXXX-XXXX`\n\nCodes are provided by admins during promotions!",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
+        "🎁 REDEEM CODE\n━━━━━━━━━━━━━━━━━━━━━\n\nSend the code using:\n/redeem DYNO-XXXX-XXXX-XXXX\n\nCodes are provided by admins during promotions!"
     )
 
 async def redeem_command(update, context):
     try:
         if not context.args:
             await update.message.reply_text(
-                "❌ Usage: `/redeem DYNO-XXXX-XXXX-XXXX`\n\nExample: `/redeem DYNO-X5C6-B3TB-CNB0`",
-                parse_mode='Markdown'
+                "❌ Usage: /redeem DYNO-XXXX-XXXX-XXXX\n\nExample: /redeem DYNO-X5C6-B3TB-CNB0"
             )
             return
         
@@ -731,13 +756,11 @@ async def redeem_command(update, context):
             user = get_user(uid)
             balance = float(user['balance']) if user['balance'] else 0
             await update.message.reply_text(
-                f"✅ Redeem Successful!\n━━━━━━━━━━━━━━━━━━━━━\n\n💰 +`{amount}` Credits Added!\n💳 New Balance: `{balance:.2f}` Credits\n\nBuy VPS from the PLANS menu!",
-                parse_mode='Markdown'
+                f"✅ Redeem Successful!\n━━━━━━━━━━━━━━━━━━━━━\n\n💰 +{amount} Credits Added!\n💳 New Balance: {balance:.2f} Credits\n\nBuy VPS from the PLANS menu!"
             )
         else:
             await update.message.reply_text(
-                "❌ Invalid Code!\n\n• Code may be expired\n• Code may already be used\n• Please check and try again",
-                parse_mode='Markdown'
+                "❌ Invalid Code!\n\n• Code may be expired\n• Code may already be used\n• Please check and try again"
             )
     except Exception as e:
         print(f"❌ Error in redeem: {e}")
@@ -758,18 +781,18 @@ async def referral(update, context):
 ━━━━━━━━━━━━━━━━━━━━━
 
 🔗 Your Invite Link:
-`{link}`
+{link}
 
-📊 Your Referrals: `{refs}`
+📊 Your Referrals: {refs}
 
 🎁 Rewards System:
-• `15` Credits per referral
-• `25` Bonus Credits every 5 referrals
+• 15 Credits per referral
+• 25 Bonus Credits every 5 referrals
 • Top referrers get exclusive rewards!
 
 Share your link and earn free VPS hosting!"""
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         print(f"❌ Error in referral: {e}")
 
@@ -790,7 +813,7 @@ async def leaderboard(update, context):
                 text += f"{medal} {name}\n   👥 {u[2]} referrals | 💰 {u[3]:.0f} credits\n\n"
         
         keyboard = [[InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         print(f"❌ Error in leaderboard: {e}")
 
@@ -821,12 +844,12 @@ async def support(update, context):
 
 Contact admin: @Free_hostingbyreferbot"""
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ===== ADMIN =====
 async def admin_panel(update, context):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized!", parse_mode='Markdown')
+        await update.message.reply_text("❌ Unauthorized!")
         return
     
     total = get_total()
@@ -835,17 +858,15 @@ async def admin_panel(update, context):
         [InlineKeyboardButton("📊 STATISTICS", callback_data='stats')]
     ]
     await update.message.reply_text(
-        f"🛠️ ADMIN PANEL\n━━━━━━━━━━━━━━━━━━━━━\n\n👥 Users: `{total}`",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
+        f"🛠️ ADMIN PANEL\n━━━━━━━━━━━━━━━━━━━━━\n\n👥 Users: {total}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def admin_gen_code(update, context):
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(
-        "🔑 Generate Code\n\nSend: `/gencode AMOUNT`\nExample: `/gencode 100`",
-        parse_mode='Markdown'
+        "🔑 Generate Code\n\nSend: /gencode AMOUNT\nExample: /gencode 100"
     )
 
 async def admin_stats(update, context):
@@ -855,40 +876,37 @@ async def admin_stats(update, context):
     total_bal = float(get_total_balance()) if get_total_balance() else 0
     unused = get_unused_codes()
     await query.edit_message_text(
-        f"📊 BOT STATISTICS\n━━━━━━━━━━━━━━━━━━━━━\n\n👥 Users: `{total}`\n💰 Balance: `{total_bal:.2f}`\n🎁 Unused Codes: `{unused}`",
-        parse_mode='Markdown'
+        f"📊 BOT STATISTICS\n━━━━━━━━━━━━━━━━━━━━━\n\n👥 Users: {total}\n💰 Balance: {total_bal:.2f}\n🎁 Unused Codes: {unused}"
     )
 
 async def generate_code(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
     if not context.args:
-        await update.message.reply_text("❌ Usage: `/gencode AMOUNT`\nExample: `/gencode 100`", parse_mode='Markdown')
+        await update.message.reply_text("❌ Usage: /gencode AMOUNT\nExample: /gencode 100")
         return
     amount = float(context.args[0])
     code = gen_code(amount, ADMIN_ID)
     if code:
         await update.message.reply_text(
-            f"✅ Code Generated!\n\n🔑 Code: `{code}`\n💰 Amount: `{amount}` Credits\n\nShare with users:\n`/redeem {code}`",
-            parse_mode='Markdown'
+            f"✅ Code Generated!\n\n🔑 Code: {code}\n💰 Amount: {amount} Credits\n\nShare with users:\n/redeem {code}"
         )
     else:
         await update.message.reply_text("❌ Error generating code!")
 
 async def gencode_direct(update, context):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized!", parse_mode='Markdown')
+        await update.message.reply_text("❌ Unauthorized!")
         return
     if not context.args:
-        await update.message.reply_text("❌ Usage: `/gencode AMOUNT`\nExample: `/gencode 100`", parse_mode='Markdown')
+        await update.message.reply_text("❌ Usage: /gencode AMOUNT\nExample: /gencode 100")
         return
     try:
         amount = float(context.args[0])
         code = gen_code(amount, ADMIN_ID)
         if code:
             await update.message.reply_text(
-                f"✅ Code Generated!\n\n🔑 Code: `{code}`\n💰 Amount: `{amount}` Credits",
-                parse_mode='Markdown'
+                f"✅ Code Generated!\n\n🔑 Code: {code}\n💰 Amount: {amount} Credits"
             )
         else:
             await update.message.reply_text("❌ Error generating code!")
@@ -897,14 +915,13 @@ async def gencode_direct(update, context):
 
 async def stats_direct(update, context):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized!", parse_mode='Markdown')
+        await update.message.reply_text("❌ Unauthorized!")
         return
     total = get_total()
     total_bal = float(get_total_balance()) if get_total_balance() else 0
     unused = get_unused_codes()
     await update.message.reply_text(
-        f"📊 STATISTICS\n━━━━━━━━━━━━━━━━━━━━━\n\n👥 Users: `{total}`\n💰 Balance: `{total_bal:.2f}`\n🎁 Unused Codes: `{unused}`",
-        parse_mode='Markdown'
+        f"📊 STATISTICS\n━━━━━━━━━━━━━━━━━━━━━\n\n👥 Users: {total}\n💰 Balance: {total_bal:.2f}\n🎁 Unused Codes: {unused}"
     )
 
 # ===== MAIN =====
