@@ -13,7 +13,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ===== FIX: Ensure RAW is in PATH =====
-os.environ['PATH'] = os.environ.get('PATH', '') + ':/usr/local/bin'
+os.environ['PATH'] = os.environ.get('PATH', '') + ':/usr/local/bin:/usr/bin:/root/.npm-global/bin'
 
 # ===== SETUP =====
 TOKEN = os.environ.get('BOT_TOKEN')
@@ -37,6 +37,9 @@ def get_db():
 def init():
     conn = get_db()
     c = conn.cursor()
+    
+    # ✅ NO DROP TABLE - DATA IS SAFE!
+    # Only create tables if they don't exist
     
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -84,40 +87,27 @@ def check_raw_installed():
         print(f"✅ RAW version: {result.stdout.strip()}")
         return True
     except FileNotFoundError:
-        print("❌ RAW not found in PATH. Trying to find it...")
-        possible_paths = ['/usr/local/bin/raw', '/usr/bin/raw', '/root/.npm-global/bin/raw']
-        for path in possible_paths:
-            if os.path.exists(path):
-                print(f"✅ Found RAW at: {path}")
-                os.environ['PATH'] += f":{os.path.dirname(path)}"
-                return True
-        return False
+        print("❌ RAW not found. Installing...")
+        try:
+            subprocess.run(['npm', 'install', '-g', 'rawhq'], capture_output=True, check=True, timeout=60)
+            print("✅ RAW installed successfully!")
+            return True
+        except:
+            return False
     except Exception as e:
         print(f"❌ Error checking RAW: {e}")
         return False
 
 def create_raw_vps(username, password):
     try:
-        print(f"🔍 Checking RAW installation...")
         if not check_raw_installed():
-            return {'success': False, 'error': 'RAW CLI not installed. Run: npm install -g rawhq'}
+            return {'success': False, 'error': 'RAW CLI not installed. Installing now...'}
         
         print(f"🚀 Deploying RAW VPS for {username}...")
         
-        raw_cmd = 'raw'
-        
-        deploy_cmd = [
-            raw_cmd, 'deploy',
-            '--type', 'raw-free',
-            '--region', 'eu',
-            '--name', username
-        ]
-        
-        print(f"📝 Running: {' '.join(deploy_cmd)}")
+        deploy_cmd = ['raw', 'deploy', '--type', 'raw-free', '--region', 'eu', '--name', username]
         
         result = subprocess.run(deploy_cmd, capture_output=True, text=True, timeout=180)
-        
-        print(f"📤 Return code: {result.returncode}")
         
         if result.returncode != 0:
             error_msg = result.stderr or result.stdout or 'Deployment failed'
@@ -133,7 +123,7 @@ def create_raw_vps(username, password):
         domain = f"{username}.raw-host.com"
         
         try:
-            status_cmd = [raw_cmd, 'status', '--output', 'json']
+            status_cmd = ['raw', 'status', '--output', 'json']
             status_result = subprocess.run(status_cmd, capture_output=True, text=True, timeout=30)
             
             if status_result.returncode == 0 and status_result.stdout:
@@ -147,7 +137,7 @@ def create_raw_vps(username, password):
         
         if not ip or ip == 'unknown':
             try:
-                ip_cmd = [raw_cmd, 'ssh', username, '--command', 'curl -s ifconfig.me']
+                ip_cmd = ['raw', 'ssh', username, '--command', 'curl -s ifconfig.me']
                 ip_result = subprocess.run(ip_cmd, capture_output=True, text=True, timeout=30)
                 if ip_result.returncode == 0 and ip_result.stdout.strip():
                     ip = ip_result.stdout.strip()
@@ -171,7 +161,7 @@ def create_raw_vps(username, password):
         }
         
     except subprocess.TimeoutExpired:
-        return {'success': False, 'error': 'Deployment timed out (took too long)'}
+        return {'success': False, 'error': 'Deployment timed out'}
     except Exception as e:
         print(f"❌ Exception: {e}")
         return {'success': False, 'error': str(e)}
@@ -631,23 +621,18 @@ async def buy_plan(update, context):
             )
             return
         
-        # Deduct credits
         update_balance(uid, -plan['price'])
         
-        # Generate credentials
         username = f"user{uid}_{random.randint(100,999)}"
         password = ''.join(random.choices(string.ascii_letters + string.digits + "!@#$%^&*", k=12))
         
-        # Show processing message
         await query.edit_message_text(
             f"⏳ Creating your VPS ({plan['duration']} hours)...\n\nPlease wait, this may take a few minutes."
         )
         
-        # Create VPS on RAW
         result = create_raw_vps(username, password)
         
         if result['success']:
-            # Save to database
             save_hosting_account(
                 uid, 
                 result.get('domain', f"{username}.raw-host.com"),
@@ -658,7 +643,6 @@ async def buy_plan(update, context):
                 plan['duration']
             )
             
-            # Send credentials - NO Markdown to avoid parsing errors
             creds_text = f"""✅ VPS ACTIVATED! 🎉
 
 ━━━━━━━━━━━━━━━━━━━━━
@@ -677,13 +661,11 @@ ssh {result['username']}@{result['ip']}
             
             await query.edit_message_text(creds_text)
             
-            # Notify admin
             await context.bot.send_message(
                 ADMIN_ID,
                 f"✅ NEW VPS ACTIVATED!\n\n👤 User: {uid}\n📦 Plan: {plan['name']}\n⏳ Duration: {plan['duration']} hours\n🖥️ IP: {result['ip']}\n👤 Username: {result['username']}\n🔑 Password: {password}"
             )
         else:
-            # Refund if failed
             update_balance(uid, plan['price'])
             
             await query.edit_message_text(
