@@ -8,12 +8,13 @@ import time
 import subprocess
 import json
 import re
+import shutil
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ===== FIX: Ensure RAW is in PATH =====
-os.environ['PATH'] = os.environ.get('PATH', '') + ':/usr/local/bin:/usr/bin:/root/.npm-global/bin'
+# ===== FIX: Force PATH to include RAW location =====
+os.environ['PATH'] = os.environ.get('PATH', '') + ':/usr/local/bin:/usr/bin:/root/.npm-global/bin:/root/.nvm/versions/node/v20.20.2/bin'
 
 # ===== SETUP =====
 TOKEN = os.environ.get('BOT_TOKEN')
@@ -39,8 +40,6 @@ def init():
     c = conn.cursor()
     
     # ✅ NO DROP TABLE - DATA IS SAFE!
-    # Only create tables if they don't exist
-    
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -82,32 +81,57 @@ init()
 # ===== RAW VPS FUNCTIONS =====
 
 def check_raw_installed():
+    """Check if RAW CLI is installed - NO AUTO-INSTALL"""
     try:
-        result = subprocess.run(['raw', '--version'], capture_output=True, check=True, timeout=10)
-        print(f"✅ RAW version: {result.stdout.strip()}")
-        return True
-    except FileNotFoundError:
-        print("❌ RAW not found. Installing...")
-        try:
-            subprocess.run(['npm', 'install', '-g', 'rawhq'], capture_output=True, check=True, timeout=60)
-            print("✅ RAW installed successfully!")
+        # Check using shutil
+        raw_path = shutil.which('raw')
+        if raw_path:
+            print(f"✅ RAW found at: {raw_path}")
             return True
-        except:
-            return False
+        
+        # Check specific paths
+        possible_paths = [
+            '/usr/local/bin/raw',
+            '/usr/bin/raw',
+            '/root/.npm-global/bin/raw',
+            '/root/.nvm/versions/node/v20.20.2/bin/raw'
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                print(f"✅ RAW found at: {path}")
+                os.environ['PATH'] += f":{os.path.dirname(path)}"
+                return True
+        
+        print("❌ RAW not found. Run in Console: npm install -g rawhq")
+        return False
     except Exception as e:
         print(f"❌ Error checking RAW: {e}")
         return False
 
 def create_raw_vps(username, password):
     try:
+        print("🔍 Checking RAW installation...")
         if not check_raw_installed():
-            return {'success': False, 'error': 'RAW CLI not installed. Installing now...'}
+            return {'success': False, 'error': 'RAW CLI not installed. Run: npm install -g rawhq'}
         
         print(f"🚀 Deploying RAW VPS for {username}...")
         
-        deploy_cmd = ['raw', 'deploy', '--type', 'raw-free', '--region', 'eu', '--name', username]
+        # Use full path to raw
+        raw_cmd = shutil.which('raw') or 'raw'
+        
+        deploy_cmd = [
+            raw_cmd, 'deploy',
+            '--type', 'raw-free',
+            '--region', 'eu',
+            '--name', username
+        ]
+        
+        print(f"📝 Running: {' '.join(deploy_cmd)}")
         
         result = subprocess.run(deploy_cmd, capture_output=True, text=True, timeout=180)
+        
+        print(f"📤 Return code: {result.returncode}")
         
         if result.returncode != 0:
             error_msg = result.stderr or result.stdout or 'Deployment failed'
@@ -123,7 +147,7 @@ def create_raw_vps(username, password):
         domain = f"{username}.raw-host.com"
         
         try:
-            status_cmd = ['raw', 'status', '--output', 'json']
+            status_cmd = [raw_cmd, 'status', '--output', 'json']
             status_result = subprocess.run(status_cmd, capture_output=True, text=True, timeout=30)
             
             if status_result.returncode == 0 and status_result.stdout:
@@ -137,7 +161,7 @@ def create_raw_vps(username, password):
         
         if not ip or ip == 'unknown':
             try:
-                ip_cmd = ['raw', 'ssh', username, '--command', 'curl -s ifconfig.me']
+                ip_cmd = [raw_cmd, 'ssh', username, '--command', 'curl -s ifconfig.me']
                 ip_result = subprocess.run(ip_cmd, capture_output=True, text=True, timeout=30)
                 if ip_result.returncode == 0 and ip_result.stdout.strip():
                     ip = ip_result.stdout.strip()
@@ -168,7 +192,8 @@ def create_raw_vps(username, password):
 
 def delete_raw_vps(username):
     try:
-        delete_cmd = ['raw', 'destroy', username]
+        raw_cmd = shutil.which('raw') or 'raw'
+        delete_cmd = [raw_cmd, 'destroy', username]
         result = subprocess.run(delete_cmd, capture_output=True, text=True, timeout=60)
         return result.returncode == 0
     except:
@@ -913,7 +938,7 @@ def main():
     if check_raw_installed():
         print("✅ RAW CLI is installed")
     else:
-        print("⚠️ RAW CLI not found. VPS creation will fail.")
+        print("⚠️ RAW CLI not found. Run in Console: npm install -g rawhq")
     
     app = Application.builder().token(TOKEN).build()
     
