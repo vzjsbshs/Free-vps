@@ -13,33 +13,30 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ===== AUTO-INSTALL RAW IF MISSING =====
-def install_raw_if_missing():
+# ===== AUTO-INSTALL & AUTHENTICATE RAW =====
+def install_raw():
     try:
-        # Check if raw exists
         if shutil.which('raw'):
             print("✅ RAW already installed")
+            # Ensure authentication
+            check = subprocess.run('raw status', shell=True, capture_output=True, text=True)
+            if "not authenticated" in check.stdout.lower() or "invalid" in check.stdout.lower():
+                print("⚠️ RAW needs re-authentication. Running raw init...")
+                subprocess.run('raw init', shell=True, check=False)
             return
-        
         print("📦 Installing RAW...")
-        # Install nodejs and npm if missing
         subprocess.run('apt-get update && apt-get install -y curl', shell=True, check=False)
         subprocess.run('curl -fsSL https://deb.nodesource.com/setup_20.x | bash -', shell=True, check=False)
         subprocess.run('apt-get install -y nodejs', shell=True, check=False)
         subprocess.run('npm install -g rawhq', shell=True, check=False)
         subprocess.run('raw init', shell=True, check=False)
-        
-        if shutil.which('raw'):
-            print("✅ RAW installed successfully!")
-        else:
-            print("❌ RAW installation failed")
+        print("✅ RAW installed and authenticated!")
     except Exception as e:
         print(f"⚠️ Auto-install failed: {e}")
 
-# Run auto-install at startup
-install_raw_if_missing()
+install_raw()
 
-# ===== FIX: Force RAW to be found =====
+# ===== FORCE PATH =====
 os.environ['PATH'] = '/usr/local/bin:/usr/bin:/root/.npm-global/bin:/root/.nvm/versions/node/v20.20.2/bin:' + os.environ.get('PATH', '')
 
 # ===== SETUP =====
@@ -97,52 +94,67 @@ def init():
         expiry_date TEXT
     )''')
     
+    c.execute('''CREATE TABLE IF NOT EXISTS vps_pool (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        domain TEXT,
+        ip TEXT,
+        username TEXT,
+        password TEXT,
+        plan TEXT,
+        status TEXT DEFAULT 'available',
+        assigned_to INTEGER DEFAULT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
     conn.commit()
     conn.close()
     print("✅ Database ready!")
 
 init()
 
-# ===== FIND RAW =====
+# ===== POOL CONFIGURATION =====
+POOL_TARGET = 2  # Minimum pool size per plan
+POOL_PLANS = ['1 Day', '2 Days', '3 Days', '1 Week']  # Only these plans get pool
 
+# ===== FIND RAW =====
 def find_raw():
     raw_path = shutil.which('raw')
     if raw_path:
         return raw_path
-    
     possible_paths = [
         '/usr/local/bin/raw',
         '/usr/bin/raw',
         '/root/.npm-global/bin/raw',
         '/root/.nvm/versions/node/v20.20.2/bin/raw'
     ]
-    
     for path in possible_paths:
         if os.path.exists(path):
             return path
-    
     try:
         result = subprocess.run(['which', 'raw'], capture_output=True, text=True)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     except:
         pass
-    
     return None
 
 # ===== RAW VPS FUNCTION =====
-
 def create_raw_vps(username, password):
     try:
         print(f"🚀 Creating VPS for {username}...")
-        
         raw_path = find_raw()
         if not raw_path:
-            return {'success': False, 'error': 'RAW CLI not found. Please run in Console: npm install -g rawhq'}
-        
+            return {'success': False, 'error': 'RAW CLI not found. Run: npm install -g rawhq'}
         print(f"✅ Using RAW at: {raw_path}")
         
-        # Deploy VPS
+        # Check authentication
+        check = subprocess.run(f"{raw_path} status", shell=True, capture_output=True, text=True)
+        if "not authenticated" in check.stdout.lower() or "invalid" in check.stdout.lower():
+            subprocess.run(f"{raw_path} init", shell=True, check=False)
+            check = subprocess.run(f"{raw_path} status", shell=True, capture_output=True, text=True)
+            if "not authenticated" in check.stdout.lower() or "invalid" in check.stdout.lower():
+                return {'success': False, 'error': 'RAW authentication failed. Run: raw init in console.'}
+        
         cmd = f"{raw_path} deploy --type raw-free --region eu --name {username}"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=180)
         
@@ -158,12 +170,9 @@ def create_raw_vps(username, password):
                 return {'success': False, 'error': error}
         
         time.sleep(15)
-        
-        # Get IP
         ip = "IP will be available soon"
         ip_cmd = f"{raw_path} status --output json"
         ip_result = subprocess.run(ip_cmd, shell=True, capture_output=True, text=True, timeout=30)
-        
         if ip_result.returncode == 0 and ip_result.stdout:
             try:
                 data = json.loads(ip_result.stdout)
@@ -187,8 +196,74 @@ def create_raw_vps(username, password):
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
-# ===== DATABASE FUNCTIONS =====
+# ===== POOL FUNCTIONS =====
+def get_pool_count(plan_name):
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM vps_pool WHERE plan = ? AND status = "available"', (plan_name,))
+        count = c.fetchone()[0]
+        conn.close()
+        return count
+    except:
+        return 0
 
+def get_pool_vps(plan_name):
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('SELECT * FROM vps_pool WHERE plan = ? AND status = "available" LIMIT 1', (plan_name,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return dict(row)
+        return None
+    except:
+        return None
+
+def assign_pool_vps(pool_id, user_id):
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('UPDATE vps_pool SET status = "assigned", assigned_to = ? WHERE id = ?', (user_id, pool_id))
+        conn.commit()
+        conn.close()
+        return True
+    except:
+        return False
+
+def add_to_pool(domain, ip, username, password, plan):
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('INSERT INTO vps_pool (domain, ip, username, password, plan) VALUES (?, ?, ?, ?, ?)',
+                  (domain, ip, username, password, plan))
+        conn.commit()
+        conn.close()
+        return True
+    except:
+        return False
+
+async def refill_pool(context):
+    """Background job to keep pool filled to POOL_TARGET"""
+    for plan_name in POOL_PLANS:
+        available = get_pool_count(plan_name)
+        if available < POOL_TARGET:
+            need = POOL_TARGET - available
+            print(f"🔄 Refilling pool for {plan_name}: need {need}")
+            for _ in range(need):
+                username = f"pool_{random.randint(1000,9999)}_{random.randint(100,999)}"
+                password = ''.join(random.choices(string.ascii_letters + string.digits + "!@#$%^&*", k=12))
+                result = create_raw_vps(username, password)
+                if result['success']:
+                    add_to_pool(result['domain'], result['ip'], result['username'], password, plan_name)
+                    print(f"✅ Added to pool: {result['domain']}")
+                    time.sleep(5)
+                else:
+                    print(f"❌ Failed to add to pool: {result.get('error')}")
+                    break
+
+# ===== DATABASE FUNCTIONS =====
 def get_user(uid):
     try:
         conn = get_db()
@@ -209,21 +284,17 @@ def add_user(uid, username, first_name, ref=0):
     try:
         conn = get_db()
         c = conn.cursor()
-        
         if user_exists(uid):
             conn.close()
             return False
-        
         c.execute('INSERT INTO users (user_id, username, first_name, referred_by) VALUES (?, ?, ?, ?)',
                   (uid, username, first_name, ref))
-        
         if ref and ref != uid:
             c.execute('UPDATE users SET balance = balance + 15, referrals = referrals + 1 WHERE user_id = ?', (ref,))
             c.execute('SELECT referrals FROM users WHERE user_id = ?', (ref,))
             count = c.fetchone()[0]
             if count % 5 == 0:
                 c.execute('UPDATE users SET balance = balance + 25 WHERE user_id = ?', (ref,))
-        
         conn.commit()
         conn.close()
         return True
@@ -272,19 +343,14 @@ def use_code(code, uid):
     try:
         conn = get_db()
         c = conn.cursor()
-        
         c.execute('SELECT * FROM codes WHERE code = ? AND used = 0', (code,))
         r = c.fetchone()
-        
         if not r:
             conn.close()
             return False, 0
-        
         amount = float(r[1])
-        
         c.execute('UPDATE codes SET used = 1 WHERE code = ?', (code,))
         c.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, uid))
-        
         conn.commit()
         conn.close()
         return True, amount
@@ -537,8 +603,56 @@ async def buy_plan(update, context):
             )
             return
         
-        update_balance(uid, -plan['price'])
+        # Check if this plan is eligible for pool
+        pool_eligible = plan['name'] in POOL_PLANS
         
+        if pool_eligible:
+            pool_vps = get_pool_vps(plan['name'])
+            if pool_vps:
+                # Assign from pool
+                assign_pool_vps(pool_vps['id'], uid)
+                update_balance(uid, -plan['price'])
+                
+                # Save to user's hosting accounts
+                save_hosting_account(
+                    uid,
+                    pool_vps['domain'],
+                    pool_vps['username'],
+                    pool_vps['password'],
+                    pool_vps['ip'],
+                    pool_vps['plan'],
+                    plan['duration']
+                )
+                
+                # Send instant credentials
+                creds_text = f"""✅ VPS INSTANTLY DELIVERED! 🎉
+
+━━━━━━━━━━━━━━━━━━━━━
+🌐 Domain: {pool_vps['domain']}
+🖥️ IP: {pool_vps['ip']}
+👤 Username: {pool_vps['username']}
+🔑 Password: {pool_vps['password']}
+📦 Plan: {pool_vps['plan']}
+⏳ Duration: {plan['duration']} hours
+━━━━━━━━━━━━━━━━━━━━━
+
+SSH: ssh {pool_vps['username']}@{pool_vps['ip']}
+
+⚠️ Save your credentials!"""
+                
+                await query.edit_message_text(creds_text)
+                
+                await context.bot.send_message(
+                    ADMIN_ID,
+                    f"✅ INSTANT VPS ASSIGNED!\n\nUser: {uid}\nPlan: {pool_vps['plan']}\nIP: {pool_vps['ip']}"
+                )
+                
+                # Trigger pool refill in background
+                context.job_queue.run_once(refill_pool, 10)
+                return
+        
+        # Fallback to on-demand creation
+        update_balance(uid, -plan['price'])
         username = f"user{uid}_{random.randint(100,999)}"
         password = ''.join(random.choices(string.ascii_letters + string.digits + "!@#$%^&*", k=12))
         
@@ -582,7 +696,6 @@ SSH: ssh {result['username']}@{result['ip']}
             )
         else:
             update_balance(uid, plan['price'])
-            
             await query.edit_message_text(
                 f"❌ VPS Creation Failed!\n\nError: {result.get('error', 'Unknown error')}\n\n💰 Credits have been refunded.\n\nContact admin: @Free_hostingbyreferbot"
             )
@@ -692,7 +805,8 @@ async def admin_panel(update, context):
     total = get_total()
     keyboard = [
         [InlineKeyboardButton("🔑 GENERATE CODE", callback_data='gen_code')],
-        [InlineKeyboardButton("📊 STATS", callback_data='stats')]
+        [InlineKeyboardButton("📊 STATS", callback_data='stats')],
+        [InlineKeyboardButton("🔄 FILL POOL", callback_data='fill_pool')]
     ]
     await update.message.reply_text(f"🛠️ ADMIN\n\n👥 Users: {total}", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -721,6 +835,17 @@ async def stats_callback(update, context):
         f"📊 STATS\n\n👥 Users: {total}\n💰 Balance: {total_bal:.2f}\n🎁 Unused Codes: {unused}"
     )
 
+async def fill_pool_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    if update.effective_user.id != ADMIN_ID:
+        await query.edit_message_text("❌ Unauthorized!")
+        return
+    await query.edit_message_text("🔄 Filling pool... Please wait.")
+    await refill_pool(context)
+    await query.edit_message_text("✅ Pool refill completed!")
+
+# ===== AUTO-EXPIRY =====
 async def check_expired_servers(context):
     try:
         conn = get_db()
@@ -747,7 +872,6 @@ async def check_expired_servers(context):
 def main():
     print("🚀 Starting bot...")
     
-    # Check RAW
     raw_path = find_raw()
     if raw_path:
         print(f"✅ RAW found at: {raw_path}")
@@ -772,11 +896,15 @@ def main():
     app.add_handler(CallbackQueryHandler(buy_plan, pattern='^buy_'))
     app.add_handler(CallbackQueryHandler(gencode_callback, pattern='^gen_code$'))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern='^stats$'))
+    app.add_handler(CallbackQueryHandler(fill_pool_callback, pattern='^fill_pool$'))
     
     job_queue = app.job_queue
     if job_queue:
+        # Run pool refill every 30 minutes
+        job_queue.run_repeating(refill_pool, interval=1800, first=60)
+        # Run auto-expiry every 5 minutes
         job_queue.run_repeating(check_expired_servers, interval=300, first=30)
-        print("✅ Auto-expiry checker started")
+        print("✅ Background jobs scheduled")
     
     print("🤖 Bot is running!")
     app.run_polling()
