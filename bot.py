@@ -13,6 +13,32 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
+# ===== AUTO-INSTALL RAW IF MISSING =====
+def install_raw_if_missing():
+    try:
+        # Check if raw exists
+        if shutil.which('raw'):
+            print("✅ RAW already installed")
+            return
+        
+        print("📦 Installing RAW...")
+        # Install nodejs and npm if missing
+        subprocess.run('apt-get update && apt-get install -y curl', shell=True, check=False)
+        subprocess.run('curl -fsSL https://deb.nodesource.com/setup_20.x | bash -', shell=True, check=False)
+        subprocess.run('apt-get install -y nodejs', shell=True, check=False)
+        subprocess.run('npm install -g rawhq', shell=True, check=False)
+        subprocess.run('raw init', shell=True, check=False)
+        
+        if shutil.which('raw'):
+            print("✅ RAW installed successfully!")
+        else:
+            print("❌ RAW installation failed")
+    except Exception as e:
+        print(f"⚠️ Auto-install failed: {e}")
+
+# Run auto-install at startup
+install_raw_if_missing()
+
 # ===== FIX: Force RAW to be found =====
 os.environ['PATH'] = '/usr/local/bin:/usr/bin:/root/.npm-global/bin:/root/.nvm/versions/node/v20.20.2/bin:' + os.environ.get('PATH', '')
 
@@ -80,7 +106,6 @@ init()
 # ===== FIND RAW =====
 
 def find_raw():
-    """Find RAW executable"""
     raw_path = shutil.which('raw')
     if raw_path:
         return raw_path
@@ -727,9 +752,7 @@ def main():
     if raw_path:
         print(f"✅ RAW found at: {raw_path}")
     else:
-        print("⚠️ RAW not found. Please run in Console:")
-        print("   npm install -g rawhq")
-        print("   raw init")
+        print("⚠️ RAW not found. Auto-install attempted at startup.")
     
     app = Application.builder().token(TOKEN).build()
     
