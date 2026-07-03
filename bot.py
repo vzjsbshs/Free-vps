@@ -1,5 +1,4 @@
 import os
-import sys
 import sqlite3
 import random
 import string
@@ -8,13 +7,9 @@ import time
 import subprocess
 import json
 import re
-import shutil
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-
-# ===== FIX: Force PATH to include RAW location =====
-os.environ['PATH'] = os.environ.get('PATH', '') + ':/usr/local/bin:/usr/bin:/root/.npm-global/bin:/root/.nvm/versions/node/v20.20.2/bin'
 
 # ===== SETUP =====
 TOKEN = os.environ.get('BOT_TOKEN')
@@ -39,7 +34,9 @@ def init():
     conn = get_db()
     c = conn.cursor()
     
-    # ✅ NO DROP TABLE - DATA IS SAFE!
+    # ✅ NO DROP TABLE - DATA IS NEVER DELETED!
+    # Only create tables if they don't exist
+    
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -74,127 +71,73 @@ def init():
     
     conn.commit()
     conn.close()
-    print("✅ Database initialized (data preserved!)")
+    print("✅ Database ready (data preserved!)")
 
 init()
 
-# ===== RAW VPS FUNCTIONS =====
-
-def check_raw_installed():
-    """Check if RAW CLI is installed - NO AUTO-INSTALL"""
-    try:
-        # Check using shutil
-        raw_path = shutil.which('raw')
-        if raw_path:
-            print(f"✅ RAW found at: {raw_path}")
-            return True
-        
-        # Check specific paths
-        possible_paths = [
-            '/usr/local/bin/raw',
-            '/usr/bin/raw',
-            '/root/.npm-global/bin/raw',
-            '/root/.nvm/versions/node/v20.20.2/bin/raw'
-        ]
-        
-        for path in possible_paths:
-            if os.path.exists(path):
-                print(f"✅ RAW found at: {path}")
-                os.environ['PATH'] += f":{os.path.dirname(path)}"
-                return True
-        
-        print("❌ RAW not found. Run in Console: npm install -g rawhq")
-        return False
-    except Exception as e:
-        print(f"❌ Error checking RAW: {e}")
-        return False
+# ===== RAW VPS FUNCTION =====
 
 def create_raw_vps(username, password):
+    """Create VPS using RAW CLI"""
     try:
-        print("🔍 Checking RAW installation...")
-        if not check_raw_installed():
-            return {'success': False, 'error': 'RAW CLI not installed. Run: npm install -g rawhq'}
+        print(f"🚀 Creating VPS for {username}...")
         
-        print(f"🚀 Deploying RAW VPS for {username}...")
+        # Check if raw is installed
+        check_raw = subprocess.run(['which', 'raw'], capture_output=True, text=True)
+        if not check_raw.stdout.strip():
+            return {'success': False, 'error': 'RAW CLI not installed. Run in Console: npm install -g rawhq'}
         
-        # Use full path to raw
-        raw_cmd = shutil.which('raw') or 'raw'
-        
-        deploy_cmd = [
-            raw_cmd, 'deploy',
-            '--type', 'raw-free',
-            '--region', 'eu',
-            '--name', username
-        ]
-        
-        print(f"📝 Running: {' '.join(deploy_cmd)}")
-        
-        result = subprocess.run(deploy_cmd, capture_output=True, text=True, timeout=180)
-        
-        print(f"📤 Return code: {result.returncode}")
+        # Deploy VPS
+        cmd = f"raw deploy --type raw-free --region eu --name {username}"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
         
         if result.returncode != 0:
-            error_msg = result.stderr or result.stdout or 'Deployment failed'
-            if 'not authenticated' in error_msg.lower():
-                return {'success': False, 'error': 'RAW not authenticated. Run: raw init'}
-            if 'already exists' in error_msg.lower():
-                return {'success': False, 'error': 'Server name already exists. Try again...'}
-            return {'success': False, 'error': error_msg}
+            error = result.stderr or result.stdout
+            if "already exists" in error.lower():
+                username = f"{username}_{random.randint(10,99)}"
+                cmd = f"raw deploy --type raw-free --region eu --name {username}"
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+                if result.returncode != 0:
+                    return {'success': False, 'error': result.stderr or result.stdout}
+            elif "not authenticated" in error.lower() or "invalid" in error.lower():
+                return {'success': False, 'error': 'RAW not authenticated. Run in Console: raw init'}
+            else:
+                return {'success': False, 'error': error}
         
-        time.sleep(15)
+        time.sleep(10)
         
-        ip = None
-        domain = f"{username}.raw-host.com"
+        # Get IP
+        ip_cmd = "raw status --output json"
+        ip_result = subprocess.run(ip_cmd, shell=True, capture_output=True, text=True, timeout=30)
         
-        try:
-            status_cmd = [raw_cmd, 'status', '--output', 'json']
-            status_result = subprocess.run(status_cmd, capture_output=True, text=True, timeout=30)
-            
-            if status_result.returncode == 0 and status_result.stdout:
-                data = json.loads(status_result.stdout)
+        ip = "IP will be available soon"
+        if ip_result.returncode == 0 and ip_result.stdout:
+            try:
+                data = json.loads(ip_result.stdout)
                 for server in data.get('servers', []):
                     if server.get('name') == username:
-                        ip = server.get('ip', 'unknown')
+                        ip = server.get('ip', 'IP will be available soon')
                         break
-        except:
-            pass
-        
-        if not ip or ip == 'unknown':
-            try:
-                ip_cmd = [raw_cmd, 'ssh', username, '--command', 'curl -s ifconfig.me']
-                ip_result = subprocess.run(ip_cmd, capture_output=True, text=True, timeout=30)
-                if ip_result.returncode == 0 and ip_result.stdout.strip():
-                    ip = ip_result.stdout.strip()
             except:
                 pass
-        
-        if not ip or ip == 'unknown':
-            ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', result.stdout)
-            if ip_match:
-                ip = ip_match.group(1)
-        
-        if not ip or ip == 'unknown':
-            ip = 'IP will be available soon'
         
         return {
             'success': True,
             'ip': ip,
             'username': 'root',
             'password': password,
-            'domain': domain
+            'domain': f"{username}.raw-host.com"
         }
         
     except subprocess.TimeoutExpired:
         return {'success': False, 'error': 'Deployment timed out'}
     except Exception as e:
-        print(f"❌ Exception: {e}")
         return {'success': False, 'error': str(e)}
 
 def delete_raw_vps(username):
     try:
-        raw_cmd = shutil.which('raw') or 'raw'
-        delete_cmd = [raw_cmd, 'destroy', username]
-        result = subprocess.run(delete_cmd, capture_output=True, text=True, timeout=60)
+        cmd = f"raw destroy {username}"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
         return result.returncode == 0
     except:
         return False
@@ -214,16 +157,15 @@ def get_user(uid):
     except:
         return None
 
+def user_exists(uid):
+    return get_user(uid) is not None
+
 def add_user(uid, username, first_name, ref=0):
-    conn = None
     try:
         conn = get_db()
         c = conn.cursor()
         
-        c.execute('SELECT * FROM users WHERE user_id = ?', (uid,))
-        existing = c.fetchone()
-        
-        if existing:
+        if user_exists(uid):
             conn.close()
             return False
         
@@ -241,12 +183,9 @@ def add_user(uid, username, first_name, ref=0):
         conn.close()
         return True
     except:
-        if conn:
-            conn.close()
         return False
 
 def update_balance(uid, amt):
-    conn = None
     try:
         conn = get_db()
         c = conn.cursor()
@@ -255,8 +194,6 @@ def update_balance(uid, amt):
         conn.close()
         return True
     except:
-        if conn:
-            conn.close()
         return False
 
 def get_refs(uid):
@@ -287,7 +224,6 @@ def gen_code(amt, created_by):
         return None
 
 def use_code(code, uid):
-    conn = None
     try:
         conn = get_db()
         c = conn.cursor()
@@ -308,8 +244,6 @@ def use_code(code, uid):
         conn.close()
         return True, amount
     except:
-        if conn:
-            conn.close()
         return False, 0
 
 def save_hosting_account(user_id, domain, username, password, ip, plan, duration):
@@ -407,58 +341,12 @@ def get_unused_codes():
 
 # ===== PLANS =====
 PLANS = {
-    '5hours': {
-        'name': '⏰ 5 Hours', 
-        'price': 10, 
-        'cpu': '1 vCPU', 
-        'ram': '1 GB', 
-        'storage': '10 GB',
-        'duration': 5
-    },
-    '1day': {
-        'name': '📅 1 Day', 
-        'price': 25, 
-        'cpu': '1 vCPU', 
-        'ram': '1 GB', 
-        'storage': '10 GB',
-        'duration': 24
-    },
-    '2days': {
-        'name': '📅 2 Days', 
-        'price': 45, 
-        'cpu': '2 vCPU', 
-        'ram': '2 GB', 
-        'storage': '20 GB',
-        'duration': 48
-    },
-    '3days': {
-        'name': '📅 3 Days', 
-        'price': 60, 
-        'cpu': '2 vCPU', 
-        'ram': '2 GB', 
-        'storage': '20 GB',
-        'duration': 72
-    },
-    '1week': {
-        'name': '📅 1 Week', 
-        'price': 100, 
-        'cpu': '2 vCPU', 
-        'ram': '4 GB', 
-        'storage': '40 GB',
-        'duration': 168
-    }
+    '5hours': {'name': '⏰ 5 Hours', 'price': 10, 'cpu': '1 vCPU', 'ram': '1 GB', 'storage': '10 GB', 'duration': 5},
+    '1day': {'name': '📅 1 Day', 'price': 25, 'cpu': '1 vCPU', 'ram': '1 GB', 'storage': '10 GB', 'duration': 24},
+    '2days': {'name': '📅 2 Days', 'price': 45, 'cpu': '2 vCPU', 'ram': '2 GB', 'storage': '20 GB', 'duration': 48},
+    '3days': {'name': '📅 3 Days', 'price': 60, 'cpu': '2 vCPU', 'ram': '2 GB', 'storage': '20 GB', 'duration': 72},
+    '1week': {'name': '📅 1 Week', 'price': 100, 'cpu': '2 vCPU', 'ram': '4 GB', 'storage': '40 GB', 'duration': 168}
 }
-
-# ===== AUTO-EXPIRY CHECK =====
-async def check_expired_servers(context):
-    try:
-        expired = get_expired_servers()
-        for server in expired:
-            delete_raw_vps(server['username'])
-            deactivate_server(server['id'])
-            print(f"🗑️ Deleted expired VPS: {server['domain']}")
-    except Exception as e:
-        print(f"❌ Error checking expired servers: {e}")
 
 # ===== MAIN MENU =====
 async def show_main_menu(update, context):
@@ -482,13 +370,12 @@ async def show_main_menu(update, context):
         
         refs = get_refs(uid)
         hosting = get_hosting_account(uid)
-        hosting_status = "❌ No Active VPS" if not hosting else f"✅ Active: {hosting['domain']} ({hosting['duration']} remaining)"
+        hosting_status = "❌ No Active VPS" if not hosting else f"✅ Active: {hosting['domain']}"
         
         keyboard = [
             [InlineKeyboardButton("🛒 BUY VPS", callback_data='plans')],
             [InlineKeyboardButton("👤 PROFILE", callback_data='profile'), InlineKeyboardButton("🎁 REDEEM", callback_data='redeem')],
-            [InlineKeyboardButton("👥 REFERRAL", callback_data='referral'), InlineKeyboardButton("🏆 LEADERBOARD", callback_data='leaderboard')],
-            [InlineKeyboardButton("📊 MY VPS", callback_data='my_hosting'), InlineKeyboardButton("📞 SUPPORT", callback_data='support')]
+            [InlineKeyboardButton("👥 REFERRAL", callback_data='referral'), InlineKeyboardButton("📊 MY VPS", callback_data='my_hosting')]
         ]
         
         text = f"""📊 USER DASHBOARD
@@ -526,10 +413,9 @@ async def start(update, context):
         
         if ref and int(ref) == uid:
             ref = 0
-            await update.message.reply_text("⚠️ You cannot refer yourself!")
         
-        existing = get_user(uid)
-        if existing:
+        # ✅ CHECK IF USER EXISTS - DON'T OVERWRITE
+        if user_exists(uid):
             await show_main_menu(update, context)
             return
         
@@ -539,10 +425,10 @@ async def start(update, context):
             try:
                 referrer = get_user(int(ref))
                 if referrer:
-                    balance = float(referrer['balance']) if referrer['balance'] else 0
+                    balance = referrer['balance']
                     await context.bot.send_message(
                         int(ref),
-                        f"🎉 New Referral!\n\n@{username} joined using your link!\n✅ +15 Credits!\n💰 New Balance: {balance:.2f} Credits"
+                        f"🎉 New Referral!\n\n@{username} joined!\n✅ +15 Credits!\n💰 New Balance: {balance:.2f} Credits"
                     )
             except:
                 pass
@@ -550,7 +436,7 @@ async def start(update, context):
         await show_main_menu(update, context)
     except Exception as e:
         print(f"❌ Error in start: {e}")
-        await update.message.reply_text("⚠️ An error occurred. Please try again.")
+        await update.message.reply_text("⚠️ Error! Try again.")
 
 # ===== MENU =====
 async def menu(update, context):
@@ -558,6 +444,8 @@ async def menu(update, context):
 
 # ===== BACK =====
 async def back(update, context):
+    query = update.callback_query
+    await query.answer()
     await show_main_menu(update, context)
 
 # ===== MY VPS =====
@@ -567,7 +455,7 @@ async def my_hosting(update, context):
     
     uid = query.from_user.id
     hosting = get_hosting_account(uid)
-    keyboard = [[InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')]]
+    keyboard = [[InlineKeyboardButton("🔙 BACK", callback_data='back')]]
     
     if not hosting:
         text = """📊 MY VPS
@@ -589,19 +477,16 @@ Earn credits by referring friends!"""
 ━━━━━━━━━━━━━━━━━━━━━
 
 🌐 Domain: {hosting['domain']}
-🖥️ IP Address: {hosting['ip_address']}
+🖥️ IP: {hosting['ip_address']}
 👤 Username: {hosting['username']}
 🔑 Password: {hosting['password']}
 📦 Plan: {hosting['plan']}
-⏳ Duration: {hosting['duration']}
-⏰ Time Remaining: {hours}h {minutes}m
-📅 Created: {hosting['created_at']}
+⏳ Remaining: {hours}h {minutes}m
 📅 Expires: {hosting['expiry_date']}
 
 ━━━━━━━━━━━━━━━━━━━━━
 
-SSH Login:
-ssh {hosting['username']}@{hosting['ip_address']}
+SSH: ssh {hosting['username']}@{hosting['ip_address']}
 
 ⚠️ Save your credentials!"""
     
@@ -613,12 +498,12 @@ async def show_plans(update, context):
         query = update.callback_query
         await query.answer()
         
-        text = "🛒 VPS PLANS (Time-Based)\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+        text = "🛒 VPS PLANS\n━━━━━━━━━━━━━━━━━━━━━\n\n"
         keyboard = []
         for k, v in PLANS.items():
-            text += f"{v['name']}\n💰 Price: {v['price']} Credits\n⚡ CPU: {v['cpu']}\n💾 RAM: {v['ram']}\n📀 Storage: {v['storage']}\n⏳ Duration: {v['duration']} hours\n\n"
+            text += f"{v['name']}\n💰 Price: {v['price']} Credits\n⚡ CPU: {v['cpu']}\n💾 RAM: {v['ram']}\n⏳ Duration: {v['duration']} hours\n\n"
             keyboard.append([InlineKeyboardButton(f"🛒 {v['name']} - {v['price']} Credits", callback_data=f'buy_{k}')])
-        keyboard.append([InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')])
+        keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data='back')])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         print(f"❌ Error in plans: {e}")
@@ -672,23 +557,22 @@ async def buy_plan(update, context):
 
 ━━━━━━━━━━━━━━━━━━━━━
 🌐 Domain: {result.get('domain', f"{username}.raw-host.com")}
-🖥️ IP Address: {result['ip']}
+🖥️ IP: {result['ip']}
 👤 Username: {result['username']}
 🔑 Password: {password}
 📦 Plan: {plan['name']}
 ⏳ Duration: {plan['duration']} hours
 ━━━━━━━━━━━━━━━━━━━━━
 
-SSH Login:
-ssh {result['username']}@{result['ip']}
+SSH: ssh {result['username']}@{result['ip']}
 
-⚠️ Save these credentials! Your VPS will expire after {plan['duration']} hours!"""
+⚠️ Save your credentials!"""
             
             await query.edit_message_text(creds_text)
             
             await context.bot.send_message(
                 ADMIN_ID,
-                f"✅ NEW VPS ACTIVATED!\n\n👤 User: {uid}\n📦 Plan: {plan['name']}\n⏳ Duration: {plan['duration']} hours\n🖥️ IP: {result['ip']}\n👤 Username: {result['username']}\n🔑 Password: {password}"
+                f"✅ NEW VPS!\n\nUser: {uid}\nPlan: {plan['name']}\nIP: {result['ip']}"
             )
         else:
             update_balance(uid, plan['price'])
@@ -698,7 +582,7 @@ ssh {result['username']}@{result['ip']}
             )
     except Exception as e:
         print(f"❌ Error in buy: {e}")
-        await query.edit_message_text("❌ Error processing your request. Please try again.")
+        await query.edit_message_text("❌ Error! Try again.")
 
 # ===== PROFILE =====
 async def profile(update, context):
@@ -709,26 +593,21 @@ async def profile(update, context):
         uid = query.from_user.id
         user = get_user(uid)
         if not user:
-            await query.edit_message_text("❌ Please /start first!")
+            await query.edit_message_text("❌ /start first!")
             return
         
         refs = get_refs(uid)
         balance = float(user['balance']) if user['balance'] else 0
         hosting = get_hosting_account(uid)
-        keyboard = [[InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')]]
         
-        text = f"""👤 USER PROFILE
-━━━━━━━━━━━━━━━━━━━━━
+        text = f"""👤 PROFILE
 
-🆔 User ID: {uid}
-📛 Username: @{user['username'] or 'N/A'}
+🆔 ID: {uid}
 💰 Balance: {balance:.2f} Credits
-👥 Total Referrals: {refs}
-
-📊 Referral Progress: {refs}/5 for bonus!
+👥 Referrals: {refs}
 💻 VPS: {'✅ Active' if hosting else '❌ None'}"""
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data='back')]]))
     except Exception as e:
         print(f"❌ Error in profile: {e}")
 
@@ -736,120 +615,70 @@ async def profile(update, context):
 async def redeem(update, context):
     query = update.callback_query
     await query.answer()
-    keyboard = [[InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')]]
     await query.edit_message_text(
-        "🎁 REDEEM CODE\n━━━━━━━━━━━━━━━━━━━━━\n\nSend the code using:\n/redeem DYNO-XXXX-XXXX-XXXX\n\nCodes are provided by admins during promotions!"
+        "🎁 REDEEM\n\nSend: /redeem DYNO-XXXX-XXXX-XXXX",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data='back')]])
     )
 
 async def redeem_command(update, context):
     try:
         if not context.args:
-            await update.message.reply_text(
-                "❌ Usage: /redeem DYNO-XXXX-XXXX-XXXX\n\nExample: /redeem DYNO-X5C6-B3TB-CNB0"
-            )
+            await update.message.reply_text("❌ Usage: /redeem DYNO-XXXX-XXXX-XXXX")
             return
         
         code = context.args[0].upper()
         uid = update.effective_user.id
         
-        user = get_user(uid)
-        if not user:
-            await update.message.reply_text("❌ Please /start first!")
-            return
-        
         success, amount = use_code(code, uid)
         
         if success:
             user = get_user(uid)
-            balance = float(user['balance']) if user['balance'] else 0
             await update.message.reply_text(
-                f"✅ Redeem Successful!\n━━━━━━━━━━━━━━━━━━━━━\n\n💰 +{amount} Credits Added!\n💳 New Balance: {balance:.2f} Credits\n\nBuy VPS from the PLANS menu!"
+                f"✅ Redeemed!\n\n💰 +{amount} Credits\n💳 Balance: {user['balance']:.2f} Credits"
             )
         else:
-            await update.message.reply_text(
-                "❌ Invalid Code!\n\n• Code may be expired\n• Code may already be used\n• Please check and try again"
-            )
+            await update.message.reply_text("❌ Invalid code!")
     except Exception as e:
         print(f"❌ Error in redeem: {e}")
-        await update.message.reply_text("❌ Error! Please try again.")
+        await update.message.reply_text("❌ Error!")
 
 # ===== REFERRAL =====
 async def referral(update, context):
-    try:
-        query = update.callback_query
-        await query.answer()
-        
-        uid = query.from_user.id
-        link = f"https://t.me/{context.bot.username}?start={uid}"
-        refs = get_refs(uid)
-        keyboard = [[InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')]]
-        
-        text = f"""👥 REFERRAL PROGRAM
-━━━━━━━━━━━━━━━━━━━━━
-
-🔗 Your Invite Link:
-{link}
-
-📊 Your Referrals: {refs}
-
-🎁 Rewards System:
-• 15 Credits per referral
-• 25 Bonus Credits every 5 referrals
-• Top referrers get exclusive rewards!
-
-Share your link and earn free VPS hosting!"""
-        
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e:
-        print(f"❌ Error in referral: {e}")
-
-# ===== LEADERBOARD =====
-async def leaderboard(update, context):
-    try:
-        query = update.callback_query
-        await query.answer()
-        
-        top = get_top_users(10)
-        text = "🏆 TOP REFERRERS\n━━━━━━━━━━━━━━━━━━━━━\n\n"
-        if not top:
-            text += "No users yet! Be the first! 🚀"
-        else:
-            for i, u in enumerate(top, 1):
-                medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
-                name = f"@{u[1]}" if u[1] else f"User {u[0]}"
-                text += f"{medal} {name}\n   👥 {u[2]} referrals | 💰 {u[3]:.0f} credits\n\n"
-        
-        keyboard = [[InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e:
-        print(f"❌ Error in leaderboard: {e}")
+    query = update.callback_query
+    await query.answer()
+    
+    uid = query.from_user.id
+    link = f"https://t.me/{context.bot.username}?start={uid}"
+    refs = get_refs(uid)
+    
+    await query.edit_message_text(
+        f"👥 REFERRAL\n\n🔗 {link}\n\n📊 Referrals: {refs}\n\n🎁 15 Credits each\n🎁 25 Bonus every 5 referrals",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data='back')]])
+    )
 
 # ===== SUPPORT =====
 async def support(update, context):
     query = update.callback_query
     await query.answer()
-    keyboard = [[InlineKeyboardButton("🔙 BACK TO MENU", callback_data='back')]]
-    text = """📞 SUPPORT CENTER
+    keyboard = [[InlineKeyboardButton("🔙 BACK", callback_data='back')]]
+    text = """📞 SUPPORT
 
-❓ How to earn credits?
-1️⃣ Refer friends → 15 credits each
-2️⃣ Every 5 referrals → 25 bonus credits
-3️⃣ Redeem promo codes
+❓ How to earn?
+1️⃣ Refer friends → 15 credits
+2️⃣ Every 5 referrals → 25 bonus
+3️⃣ Redeem codes
 
 ❓ How to get VPS?
 1️⃣ Earn credits
-2️⃣ Buy a time-based plan
-3️⃣ VPS is created automatically!
-4️⃣ VPS expires after time ends
+2️⃣ Buy a plan
+3️⃣ VPS created automatically!
 
-⏳ Available Plans:
+⏳ Plans:
 • 5 Hours - 10 Credits
 • 1 Day - 25 Credits
 • 2 Days - 45 Credits
 • 3 Days - 60 Credits
-• 1 Week - 100 Credits
-
-Contact admin: @Free_hostingbyreferbot"""
+• 1 Week - 100 Credits"""
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -862,105 +691,70 @@ async def admin_panel(update, context):
     total = get_total()
     keyboard = [
         [InlineKeyboardButton("🔑 GENERATE CODE", callback_data='gen_code')],
-        [InlineKeyboardButton("📊 STATISTICS", callback_data='stats')]
+        [InlineKeyboardButton("📊 STATS", callback_data='stats')]
     ]
-    await update.message.reply_text(
-        f"🛠️ ADMIN PANEL\n━━━━━━━━━━━━━━━━━━━━━\n\n👥 Users: {total}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text(f"🛠️ ADMIN\n\n👥 Users: {total}", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def admin_gen_code(update, context):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        "🔑 Generate Code\n\nSend: /gencode AMOUNT\nExample: /gencode 100"
-    )
-
-async def admin_stats(update, context):
-    query = update.callback_query
-    await query.answer()
-    total = get_total()
-    total_bal = float(get_total_balance()) if get_total_balance() else 0
-    unused = get_unused_codes()
-    await query.edit_message_text(
-        f"📊 BOT STATISTICS\n━━━━━━━━━━━━━━━━━━━━━\n\n👥 Users: {total}\n💰 Balance: {total_bal:.2f}\n🎁 Unused Codes: {unused}"
-    )
-
-async def generate_code(update, context):
+async def gen_code_cmd(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
     if not context.args:
-        await update.message.reply_text("❌ Usage: /gencode AMOUNT\nExample: /gencode 100")
+        await update.message.reply_text("Usage: /gencode AMOUNT")
         return
     amount = float(context.args[0])
     code = gen_code(amount, ADMIN_ID)
-    if code:
-        await update.message.reply_text(
-            f"✅ Code Generated!\n\n🔑 Code: {code}\n💰 Amount: {amount} Credits\n\nShare with users:\n/redeem {code}"
-        )
-    else:
-        await update.message.reply_text("❌ Error generating code!")
+    await update.message.reply_text(f"✅ Code: {code}\nAmount: {amount} Credits")
 
-async def gencode_direct(update, context):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized!")
-        return
-    if not context.args:
-        await update.message.reply_text("❌ Usage: /gencode AMOUNT\nExample: /gencode 100")
-        return
-    try:
-        amount = float(context.args[0])
-        code = gen_code(amount, ADMIN_ID)
-        if code:
-            await update.message.reply_text(
-                f"✅ Code Generated!\n\n🔑 Code: {code}\n💰 Amount: {amount} Credits"
-            )
-        else:
-            await update.message.reply_text("❌ Error generating code!")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+async def gencode_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Send: /gencode AMOUNT")
 
-async def stats_direct(update, context):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized!")
-        return
+async def stats_callback(update, context):
+    query = update.callback_query
+    await query.answer()
     total = get_total()
-    total_bal = float(get_total_balance()) if get_total_balance() else 0
+    total_bal = get_total_balance()
     unused = get_unused_codes()
-    await update.message.reply_text(
-        f"📊 STATISTICS\n━━━━━━━━━━━━━━━━━━━━━\n\n👥 Users: {total}\n💰 Balance: {total_bal:.2f}\n🎁 Unused Codes: {unused}"
+    await query.edit_message_text(
+        f"📊 STATS\n\n👥 Users: {total}\n💰 Balance: {total_bal:.2f}\n🎁 Unused Codes: {unused}"
     )
+
+# ===== AUTO-EXPIRY =====
+async def check_expired_servers(context):
+    try:
+        expired = get_expired_servers()
+        for server in expired:
+            delete_raw_vps(server['username'])
+            deactivate_server(server['id'])
+            print(f"🗑️ Deleted expired VPS: {server['domain']}")
+    except Exception as e:
+        print(f"❌ Error checking expired servers: {e}")
 
 # ===== MAIN =====
 def main():
     print("🚀 Starting bot...")
-    
-    if check_raw_installed():
-        print("✅ RAW CLI is installed")
-    else:
-        print("⚠️ RAW CLI not found. Run in Console: npm install -g rawhq")
     
     app = Application.builder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("redeem", redeem_command))
+    app.add_handler(CommandHandler("gencode", gen_code_cmd))
     app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CommandHandler("gencode", gencode_direct))
-    app.add_handler(CommandHandler("stats", stats_direct))
     
     app.add_handler(CallbackQueryHandler(show_plans, pattern='^plans$'))
     app.add_handler(CallbackQueryHandler(profile, pattern='^profile$'))
     app.add_handler(CallbackQueryHandler(redeem, pattern='^redeem$'))
     app.add_handler(CallbackQueryHandler(referral, pattern='^referral$'))
-    app.add_handler(CallbackQueryHandler(leaderboard, pattern='^leaderboard$'))
-    app.add_handler(CallbackQueryHandler(support, pattern='^support$'))
     app.add_handler(CallbackQueryHandler(my_hosting, pattern='^my_hosting$'))
+    app.add_handler(CallbackQueryHandler(support, pattern='^support$'))
     app.add_handler(CallbackQueryHandler(back, pattern='^back$'))
     app.add_handler(CallbackQueryHandler(buy_plan, pattern='^buy_'))
-    app.add_handler(CallbackQueryHandler(admin_gen_code, pattern='^gen_code$'))
-    app.add_handler(CallbackQueryHandler(admin_stats, pattern='^stats$'))
+    app.add_handler(CallbackQueryHandler(gencode_callback, pattern='^gen_code$'))
+    app.add_handler(CallbackQueryHandler(stats_callback, pattern='^stats$'))
     
+    # Auto-expiry checker
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(check_expired_servers, interval=300, first=30)
