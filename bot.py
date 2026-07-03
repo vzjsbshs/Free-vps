@@ -80,27 +80,22 @@ init()
 # ===== FIND RAW =====
 
 def find_raw():
-    """Find RAW executable - checks ALL possible locations"""
-    # Check if raw exists using shutil
+    """Find RAW executable"""
     raw_path = shutil.which('raw')
     if raw_path:
         return raw_path
     
-    # Check ALL common locations
     possible_paths = [
         '/usr/local/bin/raw',
         '/usr/bin/raw',
         '/root/.npm-global/bin/raw',
-        '/root/.nvm/versions/node/v20.20.2/bin/raw',
-        '/home/root/.npm-global/bin/raw',
-        '/opt/node/bin/raw'
+        '/root/.nvm/versions/node/v20.20.2/bin/raw'
     ]
     
     for path in possible_paths:
         if os.path.exists(path):
             return path
     
-    # Try to find using 'which' command
     try:
         result = subprocess.run(['which', 'raw'], capture_output=True, text=True)
         if result.returncode == 0 and result.stdout.strip():
@@ -113,7 +108,6 @@ def find_raw():
 # ===== RAW VPS FUNCTION =====
 
 def create_raw_vps(username, password):
-    """Create VPS using RAW CLI"""
     try:
         print(f"🚀 Creating VPS for {username}...")
         
@@ -123,17 +117,8 @@ def create_raw_vps(username, password):
         
         print(f"✅ Using RAW at: {raw_path}")
         
-        # Check if authenticated
-        check_cmd = f"{raw_path} status"
-        check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, timeout=30)
-        
-        if "not authenticated" in check_result.stdout.lower():
-            return {'success': False, 'error': 'RAW not authenticated. Run in Console: raw init'}
-        
         # Deploy VPS
         cmd = f"{raw_path} deploy --type raw-free --region eu --name {username}"
-        print(f"📝 Running: {cmd}")
-        
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=180)
         
         if result.returncode != 0:
@@ -150,10 +135,10 @@ def create_raw_vps(username, password):
         time.sleep(15)
         
         # Get IP
+        ip = "IP will be available soon"
         ip_cmd = f"{raw_path} status --output json"
         ip_result = subprocess.run(ip_cmd, shell=True, capture_output=True, text=True, timeout=30)
         
-        ip = "IP will be available soon"
         if ip_result.returncode == 0 and ip_result.stdout:
             try:
                 data = json.loads(ip_result.stdout)
@@ -177,7 +162,7 @@ def create_raw_vps(username, password):
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
-# ===== REST OF THE BOT FUNCTIONS =====
+# ===== DATABASE FUNCTIONS =====
 
 def get_user(uid):
     try:
@@ -745,7 +730,6 @@ def main():
         print("⚠️ RAW not found. Please run in Console:")
         print("   npm install -g rawhq")
         print("   raw init")
-        print(f"Current PATH: {os.environ.get('PATH', '')}")
     
     app = Application.builder().token(TOKEN).build()
     
