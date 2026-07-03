@@ -8,12 +8,13 @@ import time
 import subprocess
 import json
 import re
+import shutil
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ===== FIX: Add RAW to PATH =====
-os.environ['PATH'] = os.environ.get('PATH', '') + ':/usr/local/bin:/usr/bin:/root/.npm-global/bin'
+# ===== FIX: Force RAW to be found =====
+os.environ['PATH'] = '/usr/local/bin:/usr/bin:/root/.npm-global/bin:/root/.nvm/versions/node/v20.20.2/bin:' + os.environ.get('PATH', '')
 
 # ===== SETUP =====
 TOKEN = os.environ.get('BOT_TOKEN')
@@ -76,6 +77,39 @@ def init():
 
 init()
 
+# ===== FIND RAW =====
+
+def find_raw():
+    """Find RAW executable - checks ALL possible locations"""
+    # Check if raw exists using shutil
+    raw_path = shutil.which('raw')
+    if raw_path:
+        return raw_path
+    
+    # Check ALL common locations
+    possible_paths = [
+        '/usr/local/bin/raw',
+        '/usr/bin/raw',
+        '/root/.npm-global/bin/raw',
+        '/root/.nvm/versions/node/v20.20.2/bin/raw',
+        '/home/root/.npm-global/bin/raw',
+        '/opt/node/bin/raw'
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    
+    # Try to find using 'which' command
+    try:
+        result = subprocess.run(['which', 'raw'], capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except:
+        pass
+    
+    return None
+
 # ===== RAW VPS FUNCTION =====
 
 def create_raw_vps(username, password):
@@ -83,38 +117,37 @@ def create_raw_vps(username, password):
     try:
         print(f"🚀 Creating VPS for {username}...")
         
-        # Check if raw exists
-        import shutil
-        raw_path = shutil.which('raw')
+        raw_path = find_raw()
         if not raw_path:
-            # Try common locations
-            possible_paths = ['/usr/local/bin/raw', '/usr/bin/raw', '/root/.npm-global/bin/raw']
-            for p in possible_paths:
-                if os.path.exists(p):
-                    raw_path = p
-                    break
+            return {'success': False, 'error': 'RAW CLI not found. Please run in Console: npm install -g rawhq'}
         
-        if not raw_path:
-            return {'success': False, 'error': 'RAW CLI not found. Please install: npm install -g rawhq'}
+        print(f"✅ Using RAW at: {raw_path}")
+        
+        # Check if authenticated
+        check_cmd = f"{raw_path} status"
+        check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, timeout=30)
+        
+        if "not authenticated" in check_result.stdout.lower():
+            return {'success': False, 'error': 'RAW not authenticated. Run in Console: raw init'}
         
         # Deploy VPS
         cmd = f"{raw_path} deploy --type raw-free --region eu --name {username}"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+        print(f"📝 Running: {cmd}")
+        
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=180)
         
         if result.returncode != 0:
             error = result.stderr or result.stdout
             if "already exists" in error.lower():
                 username = f"{username}_{random.randint(10,99)}"
                 cmd = f"{raw_path} deploy --type raw-free --region eu --name {username}"
-                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=180)
                 if result.returncode != 0:
                     return {'success': False, 'error': result.stderr or result.stdout}
-            elif "not authenticated" in error.lower() or "invalid" in error.lower():
-                return {'success': False, 'error': 'RAW not authenticated. Run: raw init'}
             else:
                 return {'success': False, 'error': error}
         
-        time.sleep(10)
+        time.sleep(15)
         
         # Get IP
         ip_cmd = f"{raw_path} status --output json"
@@ -144,17 +177,7 @@ def create_raw_vps(username, password):
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
-def delete_raw_vps(username):
-    try:
-        import shutil
-        raw_path = shutil.which('raw') or 'raw'
-        cmd = f"{raw_path} destroy {username}"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
-        return result.returncode == 0
-    except:
-        return False
-
-# ===== DATABASE FUNCTIONS =====
+# ===== REST OF THE BOT FUNCTIONS =====
 
 def get_user(uid):
     try:
@@ -285,28 +308,6 @@ def get_hosting_account(user_id):
     except:
         return None
 
-def get_expired_servers():
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('SELECT * FROM hosting_accounts WHERE status = "active" AND expiry_date <= datetime("now")')
-        r = c.fetchall()
-        conn.close()
-        return r
-    except:
-        return []
-
-def deactivate_server(server_id):
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('UPDATE hosting_accounts SET status = "expired" WHERE id = ?', (server_id,))
-        conn.commit()
-        conn.close()
-        return True
-    except:
-        return False
-
 def get_total():
     try:
         conn = get_db()
@@ -317,17 +318,6 @@ def get_total():
         return r
     except:
         return 0
-
-def get_top_users(limit=10):
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('SELECT user_id, username, referrals, balance FROM users ORDER BY referrals DESC LIMIT ?', (limit,))
-        r = c.fetchall()
-        conn.close()
-        return r
-    except:
-        return []
 
 def get_total_balance():
     try:
@@ -360,7 +350,8 @@ PLANS = {
     '1week': {'name': '📅 1 Week', 'price': 100, 'cpu': '2 vCPU', 'ram': '4 GB', 'storage': '40 GB', 'duration': 168}
 }
 
-# ===== MAIN MENU =====
+# ===== BOT HANDLERS =====
+
 async def show_main_menu(update, context):
     try:
         if hasattr(update, 'message') and update.message:
@@ -415,7 +406,6 @@ Invite friends to earn credits!"""
     except Exception as e:
         print(f"❌ Error in main menu: {e}")
 
-# ===== START =====
 async def start(update, context):
     try:
         uid = update.effective_user.id
@@ -449,17 +439,14 @@ async def start(update, context):
         print(f"❌ Error in start: {e}")
         await update.message.reply_text("⚠️ Error! Try again.")
 
-# ===== MENU =====
 async def menu(update, context):
     await show_main_menu(update, context)
 
-# ===== BACK =====
 async def back(update, context):
     query = update.callback_query
     await query.answer()
     await show_main_menu(update, context)
 
-# ===== MY VPS =====
 async def my_hosting(update, context):
     query = update.callback_query
     await query.answer()
@@ -503,7 +490,6 @@ SSH: ssh {hosting['username']}@{hosting['ip_address']}
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ===== PLANS =====
 async def show_plans(update, context):
     try:
         query = update.callback_query
@@ -519,7 +505,6 @@ async def show_plans(update, context):
     except Exception as e:
         print(f"❌ Error in plans: {e}")
 
-# ===== BUY PLAN =====
 async def buy_plan(update, context):
     try:
         query = update.callback_query
@@ -595,7 +580,6 @@ SSH: ssh {result['username']}@{result['ip']}
         print(f"❌ Error in buy: {e}")
         await query.edit_message_text("❌ Error! Try again.")
 
-# ===== PROFILE =====
 async def profile(update, context):
     try:
         query = update.callback_query
@@ -622,7 +606,6 @@ async def profile(update, context):
     except Exception as e:
         print(f"❌ Error in profile: {e}")
 
-# ===== REDEEM =====
 async def redeem(update, context):
     query = update.callback_query
     await query.answer()
@@ -653,7 +636,6 @@ async def redeem_command(update, context):
         print(f"❌ Error in redeem: {e}")
         await update.message.reply_text("❌ Error!")
 
-# ===== REFERRAL =====
 async def referral(update, context):
     query = update.callback_query
     await query.answer()
@@ -667,7 +649,6 @@ async def referral(update, context):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data='back')]])
     )
 
-# ===== SUPPORT =====
 async def support(update, context):
     query = update.callback_query
     await query.answer()
@@ -693,7 +674,6 @@ async def support(update, context):
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ===== ADMIN =====
 async def admin_panel(update, context):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Unauthorized!")
@@ -731,13 +711,24 @@ async def stats_callback(update, context):
         f"📊 STATS\n\n👥 Users: {total}\n💰 Balance: {total_bal:.2f}\n🎁 Unused Codes: {unused}"
     )
 
-# ===== AUTO-EXPIRY =====
 async def check_expired_servers(context):
     try:
-        expired = get_expired_servers()
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('SELECT * FROM hosting_accounts WHERE status = "active" AND expiry_date <= datetime("now")')
+        expired = c.fetchall()
+        conn.close()
+        
         for server in expired:
-            delete_raw_vps(server['username'])
-            deactivate_server(server['id'])
+            raw_path = find_raw() or 'raw'
+            cmd = f"{raw_path} destroy {server['username']}"
+            subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+            
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('UPDATE hosting_accounts SET status = "expired" WHERE id = ?', (server['id'],))
+            conn.commit()
+            conn.close()
             print(f"🗑️ Deleted expired VPS: {server['domain']}")
     except Exception as e:
         print(f"❌ Error checking expired servers: {e}")
@@ -746,12 +737,14 @@ async def check_expired_servers(context):
 def main():
     print("🚀 Starting bot...")
     
-    # Test RAW
-    import shutil
-    if shutil.which('raw'):
-        print("✅ RAW is available")
+    # Check RAW
+    raw_path = find_raw()
+    if raw_path:
+        print(f"✅ RAW found at: {raw_path}")
     else:
-        print("⚠️ RAW not found in PATH")
+        print("⚠️ RAW not found. Please run in Console:")
+        print("   npm install -g rawhq")
+        print("   raw init")
         print(f"Current PATH: {os.environ.get('PATH', '')}")
     
     app = Application.builder().token(TOKEN).build()
@@ -782,5 +775,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
     main()
