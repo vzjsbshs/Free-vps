@@ -1,4 +1,5 @@
 import os
+import sys
 import sqlite3
 import random
 import string
@@ -10,6 +11,9 @@ import re
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+
+# ===== FIX: Add RAW to PATH =====
+os.environ['PATH'] = os.environ.get('PATH', '') + ':/usr/local/bin:/usr/bin:/root/.npm-global/bin'
 
 # ===== SETUP =====
 TOKEN = os.environ.get('BOT_TOKEN')
@@ -33,9 +37,6 @@ def get_db():
 def init():
     conn = get_db()
     c = conn.cursor()
-    
-    # ✅ NO DROP TABLE - DATA IS NEVER DELETED!
-    # Only create tables if they don't exist
     
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -71,7 +72,7 @@ def init():
     
     conn.commit()
     conn.close()
-    print("✅ Database ready (data preserved!)")
+    print("✅ Database ready!")
 
 init()
 
@@ -82,32 +83,41 @@ def create_raw_vps(username, password):
     try:
         print(f"🚀 Creating VPS for {username}...")
         
-        # Check if raw is installed
-        check_raw = subprocess.run(['which', 'raw'], capture_output=True, text=True)
-        if not check_raw.stdout.strip():
-            return {'success': False, 'error': 'RAW CLI not installed. Run in Console: npm install -g rawhq'}
+        # Check if raw exists
+        import shutil
+        raw_path = shutil.which('raw')
+        if not raw_path:
+            # Try common locations
+            possible_paths = ['/usr/local/bin/raw', '/usr/bin/raw', '/root/.npm-global/bin/raw']
+            for p in possible_paths:
+                if os.path.exists(p):
+                    raw_path = p
+                    break
+        
+        if not raw_path:
+            return {'success': False, 'error': 'RAW CLI not found. Please install: npm install -g rawhq'}
         
         # Deploy VPS
-        cmd = f"raw deploy --type raw-free --region eu --name {username}"
+        cmd = f"{raw_path} deploy --type raw-free --region eu --name {username}"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
         
         if result.returncode != 0:
             error = result.stderr or result.stdout
             if "already exists" in error.lower():
                 username = f"{username}_{random.randint(10,99)}"
-                cmd = f"raw deploy --type raw-free --region eu --name {username}"
+                cmd = f"{raw_path} deploy --type raw-free --region eu --name {username}"
                 result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
                 if result.returncode != 0:
                     return {'success': False, 'error': result.stderr or result.stdout}
             elif "not authenticated" in error.lower() or "invalid" in error.lower():
-                return {'success': False, 'error': 'RAW not authenticated. Run in Console: raw init'}
+                return {'success': False, 'error': 'RAW not authenticated. Run: raw init'}
             else:
                 return {'success': False, 'error': error}
         
         time.sleep(10)
         
         # Get IP
-        ip_cmd = "raw status --output json"
+        ip_cmd = f"{raw_path} status --output json"
         ip_result = subprocess.run(ip_cmd, shell=True, capture_output=True, text=True, timeout=30)
         
         ip = "IP will be available soon"
@@ -136,7 +146,9 @@ def create_raw_vps(username, password):
 
 def delete_raw_vps(username):
     try:
-        cmd = f"raw destroy {username}"
+        import shutil
+        raw_path = shutil.which('raw') or 'raw'
+        cmd = f"{raw_path} destroy {username}"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
         return result.returncode == 0
     except:
@@ -414,7 +426,6 @@ async def start(update, context):
         if ref and int(ref) == uid:
             ref = 0
         
-        # ✅ CHECK IF USER EXISTS - DON'T OVERWRITE
         if user_exists(uid):
             await show_main_menu(update, context)
             return
@@ -735,6 +746,14 @@ async def check_expired_servers(context):
 def main():
     print("🚀 Starting bot...")
     
+    # Test RAW
+    import shutil
+    if shutil.which('raw'):
+        print("✅ RAW is available")
+    else:
+        print("⚠️ RAW not found in PATH")
+        print(f"Current PATH: {os.environ.get('PATH', '')}")
+    
     app = Application.builder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -754,7 +773,6 @@ def main():
     app.add_handler(CallbackQueryHandler(gencode_callback, pattern='^gen_code$'))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern='^stats$'))
     
-    # Auto-expiry checker
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(check_expired_servers, interval=300, first=30)
@@ -764,4 +782,5 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
+    main()
     main()
